@@ -95,6 +95,18 @@ MobilityHelper InstallStaMove(double maxRadius, uint32_t nwifiSTA, NodeContainer
     mobilitysta.Install(wifiStaNodes);
     return mobilitysta;
 }
+// packet receive
+void RxTrace(std::string context, Ptr<const Packet> packet)
+{
+    std::cout << Simulator::Now().GetSeconds() << "s: Packet received" << std::endl;
+}
+// sta SNR
+void MyRxCallback(Ptr<const WifiPsdu> psdu, RxSignalInfo info, const WifiTxVector &txvector,const std::vector<bool> &mpduStatus)
+{
+    std::cout << "packet get SNR: " << info.snr <<"dB"<< std::endl;
+}
+
+
 /**
  * @param udp true if UDP is used, false if TCP is used
  * @param serverApp a container of server applications
@@ -199,6 +211,9 @@ main(int argc, char* argv[])
     Time tputInterval{0}; // interval for detailed throughput measurement
     Time accessReqInterval{0};
 
+    //move 
+    double maxRadius = 45.0;
+
     CommandLine cmd(__FILE__);
     
     cmd.Parse(argc, argv);
@@ -271,12 +286,13 @@ main(int argc, char* argv[])
                 wifiStaNodes.Create(nStations);
                 NodeContainer wifiApNode;
                 wifiApNode.Create(1);
-
                 NetDeviceContainer apDevice;
                 NetDeviceContainer staDevices;
                 WifiMacHelper mac;
                 WifiHelper wifi;
-
+           
+                
+                
                 wifi.SetStandard(WIFI_STANDARD_80211be);
                 std::array<std::string, 3> channelStr;
                 std::array<FrequencyRange, 3> freqRanges;
@@ -351,6 +367,9 @@ main(int argc, char* argv[])
                 SpectrumWifiPhyHelper phy(nLinks);
                 phy.SetPcapDataLinkType(WifiPhyHelper::DLT_IEEE802_11_RADIO);
                 phy.Set("ChannelSwitchDelay", TimeValue(channelSwitchDelay));
+            //error model
+                phy.SetErrorRateModel("ns3::YansErrorRateModel");
+
 
                 mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(ssid));
                 mac.SetEmlsrManager(emlsrMgrTypeId,
@@ -366,17 +385,22 @@ main(int argc, char* argv[])
                                     BooleanValue(auxPhyTxCapable),
                                     "AuxPhyChannelWidth",
                                     UintegerValue(auxPhyChWidth));
-            //channel model
-            
-                SpectrumChannelHelper SpectrumChannelHelper;
+            //channel model   
+                
                 for (uint8_t linkId = 0; linkId < nLinks; linkId++)
                 {
                     phy.Set(linkId, "ChannelSettings", StringValue(channelStr[linkId]));
 
+
                     auto spectrumChannel = CreateObject<MultiModelSpectrumChannel>();
-                    //signal loss model 
+                    
+                    
+                    //signal loss model - have value ->get ptr:lossmodel
                     auto lossModel = CreateObject<LogDistancePropagationLossModel>();
+                    
+                    //add error  channel install lossmodel
                     spectrumChannel->AddPropagationLossModel(lossModel);
+                    
                     phy.AddChannel(spectrumChannel, freqRanges[linkId]);
                 }
 
@@ -413,10 +437,10 @@ main(int argc, char* argv[])
                 Config::Set("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Mac/MpduBufferSize",
                             UintegerValue(mpduBufferSize));
 
-            // mobility.
+            // mobility
                 MobilityHelper mobilitySTA;
                 MobilityHelper mobilityAP;
-                double maxRadius = 45.0;
+                
                 mobilitySTA =InstallStaMove(maxRadius,nStations,wifiStaNodes);
                 mobilityAP = InstallApMove(wifiApNode);
 
@@ -476,6 +500,15 @@ main(int argc, char* argv[])
 
                         clientApp.Start(Seconds(1));
                         clientApp.Stop(simulationTime + Seconds(1));
+                        
+                    //test
+                        //serverApp.Get(0)->TraceConnect("Rx", "", MakeCallback(&RxTrace));
+                        //Ptr<WifiNetDevice> dev = staDevices.Get(0)->GetObject<WifiNetDevice>();
+                        //Ptr<WifiPhy> pp = dev->GetPhy();
+                        //Ptr<YansErrorRateModel> yans =DynamicCast<YansErrorRateModel>(err);
+                        //pp->SetReceiveOkCallback(MyRxCallback);
+
+
                     }
                 }
                 else
