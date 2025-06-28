@@ -17,6 +17,7 @@
 #include "ns3/ipv4-address-helper.h"
 #include "ns3/log.h"
 #include "ns3/mobility-helper.h"
+#include "ns3/mobility-module.h"
 #include "ns3/multi-model-spectrum-channel.h"
 #include "ns3/on-off-helper.h"
 #include "ns3/packet-sink-helper.h"
@@ -31,33 +32,69 @@
 #include "ns3/yans-wifi-channel.h"
 #include "ns3/yans-wifi-helper.h"
 
+#include "ns3/spectrum-model.h"
+#include "ns3/spectrum-helper.h"
+#include "ns3/wifi-module.h"
+#include "ns3/core-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/network-module.h"
+
 #include <algorithm>
 #include <array>
 #include <functional>
 #include <numeric>
 
-// This is a simple example in order to show how to configure an IEEE 802.11be Wi-Fi network.
-//
-// It outputs the UDP or TCP goodput for every EHT MCS value, which depends on the MCS value (0 to
-// 13), the channel width (20, 40, 80 or 160 MHz) and the guard interval (800ns, 1600ns or 3200ns).
-// The PHY bitrate is constant over all the simulation run. The user can also specify the distance
-// between the access point and the station: the larger the distance the smaller the goodput.
-//
-// The simulation assumes a configurable number of stations in an infrastructure network:
-//
-//  STA     AP
-//    *     *
-//    |     |
-//   n1     n2
-//
-// Packets in this simulation belong to BestEffort Access Class (AC_BE).
-// By selecting an acknowledgment sequence for DL MU PPDUs, it is possible to aggregate a
-// Round Robin scheduler to the AP, so that DL MU PPDUs are sent by the AP via DL OFDMA.
+
 
 using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE("eht-wifi-network");
 
+
+//func
+MobilityHelper InstallApMove(NodeContainer wifiApNode)
+{
+    MobilityHelper mobilityAp;
+    Ptr<ListPositionAllocator> apAlloc = CreateObject<ListPositionAllocator>();
+    apAlloc->Add(Vector(0.0,0.0,0.0)); //AP position
+    mobilityAp.SetPositionAllocator(apAlloc);
+    mobilityAp.SetMobilityModel("ns3::ConstantPositionMobilityModel"); 
+    mobilityAp.Install(wifiApNode);
+    return mobilityAp;
+}
+
+MobilityHelper InstallStaMove(double maxRadius, uint32_t nwifiSTA, NodeContainer wifiStaNodes)
+{
+  // Create Uniform Distribution STA Position
+  
+    Ptr<ListPositionAllocator> staPosAlloc = CreateObject<ListPositionAllocator>();
+    Ptr<UniformRandomVariable> rhoGen = CreateObject<UniformRandomVariable>(); //scaling ratio
+    rhoGen->SetAttribute("Min", DoubleValue(0.0));
+    rhoGen->SetAttribute("Max", DoubleValue(1.0)); 
+    
+    Ptr<UniformRandomVariable> angleGen = CreateObject<UniformRandomVariable>();//Random angle
+    angleGen->SetAttribute("Min", DoubleValue(0.0));
+    angleGen->SetAttribute("Max", DoubleValue(2 * M_PI));
+
+    MobilityHelper mobilitysta;
+    for (uint32_t i = 0; i < nwifiSTA;++i)
+    {
+      double radius = maxRadius * std::sqrt(rhoGen->GetValue()); //uniform radius maxRadius * scaling ratio
+      double angle = angleGen->GetValue();
+      
+      double x = radius * std::cos(angle);
+      double y = radius * std::sin(angle);
+      staPosAlloc->Add(Vector(x,y,0.0));
+        
+    }
+    mobilitysta.SetPositionAllocator(staPosAlloc);
+    mobilitysta.SetMobilityModel("ns3::RandomWalk2dMobilityModel",
+                              "Bounds",
+                              RectangleValue(Rectangle(-maxRadius, maxRadius, -maxRadius, maxRadius)));
+    mobilitysta.Install(wifiStaNodes);
+    return mobilitysta;
+}
 /**
  * @param udp true if UDP is used, false if TCP is used
  * @param serverApp a container of server applications
@@ -134,9 +171,8 @@ int
 main(int argc, char* argv[])
 {
     bool udp{true};
-    bool downlink{true};
+    bool downlink{false};
     bool useRts{false};
-    bool use80Plus80{false};
     uint16_t mpduBufferSize{512};
     std::string emlsrMgrTypeId{"ns3::DefaultEmlsrManager"};
     std::string emlsrLinks;
@@ -147,7 +183,7 @@ main(int argc, char* argv[])
     uint16_t auxPhyChWidth{20};
     bool auxPhyTxCapable{true};
     Time simulationTime{"10s"};
-    meter_u distance{1.0};
+    
     double frequency{5};  // whether the first link operates in the 2.4, 5 or 6 GHz
     double frequency2{0}; // whether the second link operates in the 2.4, 5 or 6 GHz (0 means no
                           // second link exists)
@@ -159,100 +195,12 @@ main(int argc, char* argv[])
     bool enableBsrp{false};
     std::string mcsStr;
     std::vector<uint64_t> mcsValues;
-    int channelWidth{-1};  // in MHz, -1 indicates an unset value
-    int guardInterval{-1}; // in nanoseconds, -1 indicates an unset value
     uint32_t payloadSize = 700; // must fit in the max TX duration when transmitting at MCS 0 over an RU of 26 tones
     Time tputInterval{0}; // interval for detailed throughput measurement
-    double minExpectedThroughput{0.0};
-    double maxExpectedThroughput{0.0};
     Time accessReqInterval{0};
 
     CommandLine cmd(__FILE__);
-    cmd.AddValue(
-        "frequency",
-        "Whether the first link operates in the 2.4, 5 or 6 GHz band (other values gets rejected)",
-        frequency);
-    cmd.AddValue(
-        "frequency2",
-        "Whether the second link operates in the 2.4, 5 or 6 GHz band (0 means the device has one "
-        "link, otherwise the band must be different than first link and third link)",
-        frequency2);
-    cmd.AddValue(
-        "frequency3",
-        "Whether the third link operates in the 2.4, 5 or 6 GHz band (0 means the device has up to "
-        "two links, otherwise the band must be different than first link and second link)",
-        frequency3);
-    cmd.AddValue("emlsrMgrTypeId", "The ns-3 TypeId of the EMLSR manager to use", emlsrMgrTypeId);
-    cmd.AddValue("emlsrLinks",
-                 "The comma separated list of IDs of EMLSR links (for MLDs only)",
-                 emlsrLinks);
-    cmd.AddValue("emlsrPaddingDelay",
-                 "The EMLSR padding delay in microseconds (0, 32, 64, 128 or 256)",
-                 paddingDelayUsec);
-    cmd.AddValue("emlsrTransitionDelay",
-                 "The EMLSR transition delay in microseconds (0, 16, 32, 64, 128 or 256)",
-                 transitionDelayUsec);
-    cmd.AddValue("emlsrAuxSwitch",
-                 "Whether Aux PHY should switch channel to operate on the link on which "
-                 "the Main PHY was operating before moving to the link of the Aux PHY. ",
-                 switchAuxPhy);
-    cmd.AddValue("emlsrAuxChWidth",
-                 "The maximum channel width (MHz) supported by Aux PHYs.",
-                 auxPhyChWidth);
-    cmd.AddValue("emlsrAuxTxCapable",
-                 "Whether Aux PHYs are capable of transmitting.",
-                 auxPhyTxCapable);
-    cmd.AddValue("channelSwitchDelay", "The PHY channel switch delay", channelSwitchDelay);
-    cmd.AddValue("distance",
-                 "Distance in meters between the station and the access point",
-                 distance);
-    cmd.AddValue("simulationTime", "Simulation time", simulationTime);
-    cmd.AddValue("udp", "UDP if set to 1, TCP otherwise", udp);
-    cmd.AddValue("downlink",
-                 "Generate downlink flows if set to 1, uplink flows otherwise",
-                 downlink);
-    cmd.AddValue("useRts", "Enable/disable RTS/CTS", useRts);
-    cmd.AddValue("use80Plus80", "Enable/disable use of 80+80 MHz", use80Plus80);
-    cmd.AddValue("mpduBufferSize",
-                 "Size (in number of MPDUs) of the BlockAck buffer",
-                 mpduBufferSize);
-    cmd.AddValue("nStations", "Number of non-AP EHT stations", nStations);
-    cmd.AddValue("dlAckType",
-                 "Ack sequence type for DL OFDMA (NO-OFDMA, ACK-SU-FORMAT, MU-BAR, AGGR-MU-BAR)",
-                 dlAckSeqType);
-
-    cmd.AddValue("enableUlOfdma",
-                 "Enable UL OFDMA (useful if DL OFDMA is enabled and TCP is used)",
-                 enableUlOfdma);
-
-    cmd.AddValue("enableBsrp",
-                 "Enable BSRP (useful if DL and UL OFDMA are enabled and TCP is used)",
-                 enableBsrp);
-    cmd.AddValue(
-        "muSchedAccessReqInterval",
-        "Duration of the interval between two requests for channel access made by the MU scheduler",
-        accessReqInterval);
-        
-    cmd.AddValue(
-        "mcs",
-        "list of comma separated MCS values to test; if unset, all MCS values (0-13) are tested",
-        mcsStr);
-    cmd.AddValue("channelWidth",
-                 "if set, limit testing to a specific channel width expressed in MHz (20, 40, 80 "
-                 "or 160 MHz)",
-                 channelWidth);
-    cmd.AddValue("guardInterval",
-                 "if set, limit testing to a specific guard interval duration expressed in "
-                 "nanoseconds (800, 1600 or 3200 ns)",
-                 guardInterval);
-    cmd.AddValue("payloadSize", "The application payload size in bytes", payloadSize);
-    cmd.AddValue("tputInterval", "duration of intervals for throughput measurement", tputInterval);
-    cmd.AddValue("minExpectedThroughput",
-                 "if set, simulation fails if the lowest throughput is below this value",
-                 minExpectedThroughput);
-    cmd.AddValue("maxExpectedThroughput",
-                 "if set, simulation fails if the highest throughput is above this value",
-                 maxExpectedThroughput);
+    
     cmd.Parse(argc, argv);
 
     if (useRts)
@@ -281,9 +229,7 @@ main(int argc, char* argv[])
         NS_ABORT_MSG("Invalid DL ack sequence type (must be NO-OFDMA, ACK-SU-FORMAT, MU-BAR or "
                      "AGGR-MU-BAR)");
     }
-
-    double prevThroughput[12] = {0};
-
+    
     std::cout << "MCS value"
               << "\t\t"
               << "Channel width"
@@ -291,59 +237,36 @@ main(int argc, char* argv[])
               << "GI"
               << "\t\t\t"
               << "Throughput" << '\n';
-    uint8_t minMcs = 0;
-    uint8_t maxMcs = 13;
+    uint8_t minMcs = 4;
+    uint8_t maxMcs = 4;
 
-    if (mcsStr.empty())
+    for (uint8_t mcs = minMcs; mcs <= maxMcs; ++mcs)
     {
-        for (uint8_t mcs = minMcs; mcs <= maxMcs; ++mcs)
-        {
-            mcsValues.push_back(mcs);
-        }
+        mcsValues.push_back(mcs);
     }
-    else
-    {   //check input -> can remove
-        AttributeContainerValue<UintegerValue, ',', std::vector> attr;
-        auto checker = DynamicCast<AttributeContainerChecker>(MakeAttributeContainerChecker(attr));
-        checker->SetItemChecker(MakeUintegerChecker<uint8_t>());
-        attr.DeserializeFromString(mcsStr, checker);
-        mcsValues = attr.Get();
-        std::sort(mcsValues.begin(), mcsValues.end());
-    }
-
-    int minChannelWidth = 0;
-    int maxChannelWidth = (frequency != 2.4 && frequency2 != 2.4 && frequency3 != 2.4) ? 160 : 40;
-    if (channelWidth >= minChannelWidth && channelWidth <= maxChannelWidth)
-    {
-        minChannelWidth = channelWidth;
-        maxChannelWidth = channelWidth;
-    }
-
-    int minGi = enableUlOfdma ? 1600 : 800;
-    int maxGi = 3200;
-    if (guardInterval >= minGi && guardInterval <= maxGi)
-    {
-        minGi = guardInterval;
-        maxGi = guardInterval;
-    }
+    
+    int minChannelWidth = 20;
+    int maxChannelWidth = 40;
+    
+    int minGi = 800;
+    int maxGi = 800;
+   
 
 
     for (const auto mcs : mcsValues)
     {
-        uint8_t index = 0;
-        double previous = 0;
         for (int width = minChannelWidth; width <= maxChannelWidth; width *= 2) // MHz
         {
-            const auto is80Plus80 = (use80Plus80 && (width == 160));
-            const std::string widthStr = is80Plus80 ? "80+80" : std::to_string(width);
-            const auto segmentWidthStr = is80Plus80 ? "80" : widthStr;
+            
+            const std::string widthStr = std::to_string(width);
+            const auto segmentWidthStr = widthStr;
             for (int gi = maxGi; gi >= minGi; gi /= 2) // Nanoseconds
             {
                 if (!udp)
                 {
                     Config::SetDefault("ns3::TcpSocket::SegmentSize", UintegerValue(payloadSize));
                 }
-
+            // WiFi Node Create
                 NodeContainer wifiStaNodes;
                 wifiStaNodes.Create(nStations);
                 NodeContainer wifiApNode;
@@ -418,22 +341,13 @@ main(int argc, char* argv[])
                     {
                         NS_FATAL_ERROR("Wrong frequency value!");
                     }
-
-                    if (is80Plus80)
-                    {
-                        channelStr[nLinks] += std::string(";") + channelStr[nLinks];
-                    }
-
                     nLinks++;
                 }
 
-                if (nLinks > 1 && !emlsrLinks.empty())
-                {
-                    wifi.ConfigEhtOptions("EmlsrActivated", BooleanValue(true));
-                }
-
+                
                 Ssid ssid = Ssid("ns3-80211be");
 
+            //PHY
                 SpectrumWifiPhyHelper phy(nLinks);
                 phy.SetPcapDataLinkType(WifiPhyHelper::DLT_IEEE802_11_RADIO);
                 phy.Set("ChannelSwitchDelay", TimeValue(channelSwitchDelay));
@@ -452,18 +366,24 @@ main(int argc, char* argv[])
                                     BooleanValue(auxPhyTxCapable),
                                     "AuxPhyChannelWidth",
                                     UintegerValue(auxPhyChWidth));
-
+            //channel model
+            
+                SpectrumChannelHelper SpectrumChannelHelper;
                 for (uint8_t linkId = 0; linkId < nLinks; linkId++)
                 {
                     phy.Set(linkId, "ChannelSettings", StringValue(channelStr[linkId]));
 
                     auto spectrumChannel = CreateObject<MultiModelSpectrumChannel>();
+                    //signal loss model 
                     auto lossModel = CreateObject<LogDistancePropagationLossModel>();
                     spectrumChannel->AddPropagationLossModel(lossModel);
                     phy.AddChannel(spectrumChannel, freqRanges[linkId]);
                 }
+
+            //install STA
                 staDevices = wifi.Install(phy, mac, wifiStaNodes);
 
+            //OFDMA(wait)
                 if (dlAckSeqType != "NO-OFDMA")
                 {
                     mac.SetMultiUserScheduler("ns3::RrMultiUserScheduler",
@@ -479,39 +399,34 @@ main(int argc, char* argv[])
                             BooleanValue(false),
                             "Ssid",
                             SsidValue(ssid));
+            //install AP
                 apDevice = wifi.Install(phy, mac, wifiApNode);
 
                 int64_t streamNumber = 100;
                 streamNumber += WifiHelper::AssignStreams(apDevice, streamNumber);
                 streamNumber += WifiHelper::AssignStreams(staDevices, streamNumber);
 
-                // Set guard interval and MPDU buffer size
+            // Set guard interval and MPDU buffer size
                 Config::Set(
                     "/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/HeConfiguration/GuardInterval",
                     TimeValue(NanoSeconds(gi)));
                 Config::Set("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Mac/MpduBufferSize",
                             UintegerValue(mpduBufferSize));
 
-                // mobility.
-                MobilityHelper mobility;
-                Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator>();
+            // mobility.
+                MobilityHelper mobilitySTA;
+                MobilityHelper mobilityAP;
+                double maxRadius = 45.0;
+                mobilitySTA =InstallStaMove(maxRadius,nStations,wifiStaNodes);
+                mobilityAP = InstallApMove(wifiApNode);
 
-                positionAlloc->Add(Vector(0.0, 0.0, 0.0));
-                positionAlloc->Add(Vector(distance, 0.0, 0.0));
-                mobility.SetPositionAllocator(positionAlloc);
-
-                mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
-
-                mobility.Install(wifiApNode);
-                mobility.Install(wifiStaNodes);
-
-                /* Internet stack*/
+            /* Internet stack*/
                 InternetStackHelper stack;
                 stack.Install(wifiApNode);
                 stack.Install(wifiStaNodes);
                 streamNumber += stack.AssignStreams(wifiApNode, streamNumber);
                 streamNumber += stack.AssignStreams(wifiStaNodes, streamNumber);
-//-------------------------------------------------------------------------------
+
                 Ipv4AddressHelper address;
                 address.SetBase("192.168.1.0", "255.255.255.0");
                 Ipv4InterfaceContainer staNodeInterfaces;
@@ -520,7 +435,7 @@ main(int argc, char* argv[])
                 staNodeInterfaces = address.Assign(staDevices);
                 apNodeInterface = address.Assign(apDevice);
 
-                /* Setting applications */
+             /* Setting applications */
                 ApplicationContainer serverApp;
                 auto serverNodes = downlink ? std::ref(wifiStaNodes) : std::ref(wifiApNode);
                 Ipv4InterfaceContainer serverInterfaces;
@@ -594,8 +509,8 @@ main(int argc, char* argv[])
                         clientApp.Stop(simulationTime + Seconds(1));
                     }
                 }
-
-                // cumulative number of bytes received by each server application
+    
+            // cumulative number of bytes received by each server application
                 std::vector<uint64_t> cumulRxBytes(nStations, 0);
 
                 if (tputInterval.IsStrictlyPositive())
@@ -609,65 +524,20 @@ main(int argc, char* argv[])
                                         tputInterval,
                                         simulationTime + Seconds(1));
                 }
-
+                
                 Simulator::Stop(simulationTime + Seconds(1));
                 Simulator::Run();
 
-                // When multiple stations are used, there are chances that association requests
-                // collide and hence the throughput may be lower than expected. Therefore, we relax
-                // the check that the throughput cannot decrease by introducing a scaling factor (or
-                // tolerance)
-                auto tolerance = 0.10;
+            //throughput calulate
                 cumulRxBytes = GetRxBytes(udp, serverApp, payloadSize);
                 auto rxBytes = std::accumulate(cumulRxBytes.cbegin(), cumulRxBytes.cend(), 0.0);
                 auto throughput = (rxBytes * 8) / simulationTime.GetMicroSeconds(); // Mbit/s
 
                 Simulator::Destroy();
-
+            
                 std::cout << +mcs << "\t\t\t" << widthStr << " MHz\t\t"
                           << (widthStr.size() > 3 ? "" : "\t") << gi << " ns\t\t\t" << throughput
                           << " Mbit/s" << std::endl;
-
-                // test first element
-                if (mcs == minMcs && width == 20 && gi == 3200)
-                {
-                    if (throughput * (1 + tolerance) < minExpectedThroughput)
-                    {
-                        NS_LOG_ERROR("Obtained throughput " << throughput << " is not expected!");
-                        exit(1);
-                    }
-                }
-                // test last element
-                if (mcs == maxMcs && width == maxChannelWidth && gi == 800)
-                {
-                    if (maxExpectedThroughput > 0 &&
-                        throughput > maxExpectedThroughput * (1 + tolerance))
-                    {
-                        NS_LOG_ERROR("Obtained throughput " << throughput << " is not expected!");
-                        exit(1);
-                    }
-                }
-                // test previous throughput is smaller (for the same mcs)
-                if (throughput * (1 + tolerance) > previous)
-                {
-                    previous = throughput;
-                }
-                else if (throughput > 0)
-                {
-                    NS_LOG_ERROR("Obtained throughput " << throughput << " is not expected!");
-                    exit(1);
-                }
-                // test previous throughput is smaller (for the same channel width and GI)
-                if (throughput * (1 + tolerance) > prevThroughput[index])
-                {
-                    prevThroughput[index] = throughput;
-                }
-                else if (throughput > 0)
-                {
-                    NS_LOG_ERROR("Obtained throughput " << throughput << " is not expected!");
-                    exit(1);
-                }
-                index++;
             }
         }
     }
