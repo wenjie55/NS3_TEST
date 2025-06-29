@@ -39,6 +39,10 @@
 #include "ns3/internet-module.h"
 #include "ns3/applications-module.h"
 #include "ns3/network-module.h"
+#include "ns3/flow-monitor-helper.h"
+#include "ns3/ipv4-flow-classifier.h"
+
+
 
 #include <algorithm>
 #include <array>
@@ -211,10 +215,9 @@ NodeContainer CreateMultipleInterferers(std::string bandName, uint32_t numInterf
         double start = starVar->GetValue();
         
         onoff.SetAttribute("StartTime", TimeValue(Seconds(start))); 
-        onoff.SetAttribute("StopTime", TimeValue(Seconds(stopTime)));
         
-        onoff.SetAttribute("OnTime", StringValue("ns3::UniformRandomVariable[Min=1.0|Max=2.5])")); 
-        onoff.SetAttribute("OffTime", StringValue("ns3::UniformRandomVariable[Min=0.2|Max=2.0])"));
+        onoff.SetAttribute("OnTime", StringValue("ns3::UniformRandomVariable[Min=0.2|Max=2.0])")); 
+        onoff.SetAttribute("OffTime", StringValue("ns3::UniformRandomVariable[Min=1.0|Max=2.5])"));
 
 
         onoff.Install(interfererNodes.Get(i));
@@ -317,10 +320,10 @@ main(int argc, char* argv[])
     uint16_t auxPhyChWidth{20};
     bool auxPhyTxCapable{true};
     Time simulationTime{"10s"};
-    double frequency{5};  // whether the first link operates in the 2.4, 5 or 6 GHz
-    double frequency2{0}; // whether the second link operates in the 2.4, 5 or 6 GHz (0 means no
+    double frequency{2.4};  // whether the first link operates in the 2.4, 5 or 6 GHz
+    double frequency2{5}; // whether the second link operates in the 2.4, 5 or 6 GHz (0 means no
                           // second link exists)
-    double frequency3{0}; // whether the third link operates in the 2.4, 5 or 6 GHz (0 means no third link exists)
+    double frequency3{6}; // whether the third link operates in the 2.4, 5 or 6 GHz (0 means no third link exists)
     
     std::size_t nStations{2};
     std::string dlAckSeqType{"NO-OFDMA"};
@@ -517,7 +520,7 @@ main(int argc, char* argv[])
                     
                     //signal loss model - have value ->hidden node
                     auto lossModel = CreateObject<RangePropagationLossModel>();
-                    lossModel->SetAttribute("MaxRange",DoubleValue((maxRadius/2)*1.5));
+                    lossModel->SetAttribute("MaxRange",DoubleValue((maxRadius)*1.2));
 
                     spectrumChannel->AddPropagationLossModel(lossModel);
                     
@@ -633,6 +636,7 @@ main(int argc, char* argv[])
                         onTime -> SetAttribute("Min",DoubleValue(1.0));
                         onTime -> SetAttribute("Max",DoubleValue(2.0));
                         onoff.SetAttribute("OnTime", PointerValue(onTime));
+
                         Ptr<UniformRandomVariable> offTime = CreateObject<UniformRandomVariable>();
                         offTime -> SetAttribute("Min",DoubleValue(0.5));
                         offTime -> SetAttribute("Min",DoubleValue(1.0));
@@ -700,11 +704,14 @@ main(int argc, char* argv[])
                                         tputInterval,
                                         simulationTime + Seconds(1));
                 }
-                
+                //book
+                FlowMonitorHelper flowmon;
+                Ptr<FlowMonitor> monitor = flowmon.InstallAll();
+
                 Simulator::Stop(simulationTime + Seconds(1));
                 Simulator::Run();
-
             //throughput calulate
+            
                 cumulRxBytes = GetRxBytes(udp, serverApp, payloadSize);
                 auto rxBytes = std::accumulate(cumulRxBytes.cbegin(), cumulRxBytes.cend(), 0.0);
                 auto throughput = (rxBytes * 8) / simulationTime.GetMicroSeconds(); // Mbit/s
@@ -714,6 +721,26 @@ main(int argc, char* argv[])
                 std::cout << +mcs << "\t\t\t" << widthStr << " MHz\t\t"
                           << (widthStr.size() > 3 ? "" : "\t") << gi << " ns\t\t\t" << throughput
                           << " Mbit/s" << std::endl;
+                          
+                
+                monitor->CheckForLostPackets();
+                Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowmon.GetClassifier());
+                FlowMonitor::FlowStatsContainer stats = monitor->GetFlowStats();
+
+                for (auto i = stats.begin(); i != stats.end(); ++i)
+                {
+                    
+                        Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(i->first);
+                        std::cout << "Flow " << i->first  << " (" << t.sourceAddress << " -> " << t.destinationAddress << ")\n";
+                        std::cout << "  Tx Packets: " << i->second.txPackets << "\n";
+                        std::cout << "  Tx Bytes:   " << i->second.txBytes << "\n";
+                        std::cout << "  TxOffered:  " << i->second.txBytes * 8.0 / 9.0 / 1000 / 1000
+                                << " Mbps\n\n";
+                        std::cout << "  Rx Packets: " << i->second.rxPackets << "\n";
+                        std::cout << "  Rx Bytes:   " << i->second.rxBytes << "\n";
+                        std::cout << "  Throughput: " << i->second.rxBytes * 8.0 / 9.0 / 1000 / 1000
+                                << " Mbps\n";
+                }   
             }
         }
     }
