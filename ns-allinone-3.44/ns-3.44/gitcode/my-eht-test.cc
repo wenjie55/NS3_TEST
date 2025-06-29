@@ -197,9 +197,26 @@ NodeContainer CreateMultipleInterferers(std::string bandName, uint32_t numInterf
     {
         OnOffHelper onoff("ns3::UdpSocketFactory",
                           InetSocketAddress("255.255.255.255", 9999));
-        onoff.SetConstantRate(DataRate("100Mbps")); // 可依需求調整
-        onoff.SetAttribute("StartTime", TimeValue(Seconds(startTime)));
+        std::ostringstream rate;
+        Ptr<UniformRandomVariable> rateVar = CreateObject<UniformRandomVariable>();
+        rateVar -> SetAttribute("Min",DoubleValue(10));
+        rateVar ->SetAttribute("Max", DoubleValue(100));
+        rate << static_cast<uint32_t>(rateVar->GetValue()) <<"Mbps";
+        onoff.SetConstantRate(DataRate(rate.str())); // 可依需求調整
+       
+        //
+        Ptr<UniformRandomVariable> starVar = CreateObject<UniformRandomVariable>();
+        starVar -> SetAttribute("Min",DoubleValue(0.1));
+        starVar -> SetAttribute("Max", DoubleValue(2.0));
+        double start = starVar->GetValue();
+
+        onoff.SetAttribute("StartTime", TimeValue(Seconds(start))); 
         onoff.SetAttribute("StopTime", TimeValue(Seconds(stopTime)));
+        
+        onoff.SetAttribute("OnTime", StringValue("ns3::UniformRandomVariable[Min=0.2|Max=1.0])")); 
+        onoff.SetAttribute("OffTime", StringValue("ns3::UniformRandomVariable[Min=0.5|Max=2.0])"));
+
+
         onoff.Install(interfererNodes.Get(i));
     }
 
@@ -301,7 +318,7 @@ main(int argc, char* argv[])
                           // second link exists)
     double frequency3{0}; // whether the third link operates in the 2.4, 5 or 6 GHz (0 means no third link exists)
     
-    std::size_t nStations{1};
+    std::size_t nStations{2};
     std::string dlAckSeqType{"NO-OFDMA"};
     bool enableUlOfdma{false};
     bool enableBsrp{false};
