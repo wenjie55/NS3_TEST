@@ -106,7 +106,7 @@ void MyRxCallback(Ptr<const WifiPsdu> psdu, RxSignalInfo info, const WifiTxVecto
     std::cout << "packet get SNR: " << info.snr <<"dB"<< std::endl;
 }
 
-NodeContainer CreateMultipleInterferers(uint32_t numInterferers, double radius,
+NodeContainer CreateMultipleInterferers(std::string bandName, uint32_t numInterferers, double radius,
                                         double txPowerDbm, double startTime, double stopTime)
 {
     NodeContainer interfererNodes;
@@ -126,16 +126,46 @@ NodeContainer CreateMultipleInterferers(uint32_t numInterferers, double radius,
     mobility.SetPositionAllocator(positionAlloc);
     mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
     mobility.Install(interfererNodes);
-
+    FrequencyRange freqRange;
     // 設定 PHY / MAC
+    if(bandName == "2.4GHz")
+    {
+        freqRange = WIFI_SPECTRUM_2_4_GHZ;
+    }
+    else if(bandName == "5GHz")
+    {
+        freqRange = WIFI_SPECTRUM_5_GHZ;
+    }
+    else if(bandName == "6GHz")
+    {
+        freqRange = WIFI_SPECTRUM_6_GHZ;
+    }
+    else
+    {
+        std::cout<<"error freq\n";
+    }
+
     SpectrumWifiPhyHelper phyHelper;
     Ptr<MultiModelSpectrumChannel> InspectrumChannel = CreateObject<MultiModelSpectrumChannel>();
-    auto lossModel = CreateObject<LogDistancePropagationLossModel>();
-                    spectrumChannel->AddPropagationLossModel(lossModel);
     phyHelper.SetErrorRateModel("ns3::YansErrorRateModel");
     phyHelper.Set("TxPowerStart", DoubleValue(txPowerDbm));
     phyHelper.Set("TxPowerEnd", DoubleValue(txPowerDbm));
-    phyHelper.Set("ChannelSettings", StringValue("{0, 20, BAND_5GHZ, 0}"));
+    if(bandName == "2.4GHz")
+    {
+        phyHelper.Set("ChannelSettings", StringValue("{0, 20, BAND_2_4GHZ, 0}"));
+    }
+    else if(bandName == "5GHz")
+    {
+        phyHelper.Set("ChannelSettings", StringValue("{0, 20, BAND_5GHZ, 0}"));
+    }
+    else if(bandName == "6GHz")
+    {
+        phyHelper.Set("ChannelSettings", StringValue("{0, 20, BAND_6GHZ, 0}"));
+    }
+    
+    auto lossModel = CreateObject<LogDistancePropagationLossModel>();
+    InspectrumChannel->AddPropagationLossModel(lossModel);
+    phyHelper.AddChannel(InspectrumChannel, freqRange);
 
     WifiHelper wifiHelper;
     wifiHelper.SetStandard(WIFI_STANDARD_80211be);
@@ -148,10 +178,21 @@ NodeContainer CreateMultipleInterferers(uint32_t numInterferers, double radius,
     InternetStackHelper stack;
     stack.Install(interfererNodes);
     Ipv4AddressHelper ipv4;
-    ipv4.SetBase("10.3.0.0", "255.255.255.0");
+    if(bandName == "2.4GHz")
+    {
+        ipv4.SetBase("10.3.0.0", "255.255.255.0");    
+    }
+    else if(bandName == "5GHz")
+    {
+        ipv4.SetBase("10.4.0.0", "255.255.255.0");
+    }
+    else if(bandName == "6GHz")
+    {
+        ipv4.SetBase("10.5.0.0", "255.255.255.0");
+    }
     ipv4.Assign(devices);
 
-    // 安裝 OnOff 應用產生干擾（傳給一個不存在的節點或廣播位址）
+// 安裝 OnOff 應用產生干擾（傳給一個不存在的節點或廣播位址）
     for (uint32_t i = 0; i < interfererNodes.GetN(); ++i)
     {
         OnOffHelper onoff("ns3::UdpSocketFactory",
@@ -501,11 +542,13 @@ main(int argc, char* argv[])
                 mobilityAP = InstallApMove(wifiApNode);
             //interferer
                 Ptr<SpectrumWifiPhy> interPhy;
-                double interfererDistance = 5.0;
+                double interfererDistance = 30.0;
                 double interfererPower = 20.0;
                 double simStartTime = 1.0;
                 double simStopTIme = 10.0;
-                NodeContainer interferers = CreateMultipleInterferers(4,interfererDistance,interfererPower,simStartTime,simStopTIme);
+                NodeContainer interferers2_4 = CreateMultipleInterferers("2.4GHz",3,interfererDistance,interfererPower,simStartTime,simStopTIme);
+                NodeContainer interferers5 = CreateMultipleInterferers("5GHz",3,interfererDistance,interfererPower,simStartTime,simStopTIme);
+                NodeContainer interferers6 = CreateMultipleInterferers("6GHz",3,interfererDistance,interfererPower,simStartTime,simStopTIme);
 
             /* Internet stack*/
                 InternetStackHelper stack;
