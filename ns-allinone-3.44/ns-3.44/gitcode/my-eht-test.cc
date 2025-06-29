@@ -106,6 +106,66 @@ void MyRxCallback(Ptr<const WifiPsdu> psdu, RxSignalInfo info, const WifiTxVecto
     std::cout << "packet get SNR: " << info.snr <<"dB"<< std::endl;
 }
 
+NodeContainer CreateMultipleInterferers(uint32_t numInterferers, double radius,
+                                        double txPowerDbm, double startTime, double stopTime)
+{
+    NodeContainer interfererNodes;
+    interfererNodes.Create(numInterferers);
+
+    // 位置配置：分布在圓周上
+    Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator>();
+    for (uint32_t i = 0; i < numInterferers; ++i)
+    {
+        double angle = 2 * M_PI * i / numInterferers;
+        double x = radius * std::cos(angle);
+        double y = radius * std::sin(angle);
+        positionAlloc->Add(Vector(x, y, 0.0));
+    }
+
+    MobilityHelper mobility;
+    mobility.SetPositionAllocator(positionAlloc);
+    mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+    mobility.Install(interfererNodes);
+
+    // 設定 PHY / MAC
+    SpectrumWifiPhyHelper phyHelper;
+    Ptr<MultiModelSpectrumChannel> InspectrumChannel = CreateObject<MultiModelSpectrumChannel>();
+    auto lossModel = CreateObject<LogDistancePropagationLossModel>();
+                    spectrumChannel->AddPropagationLossModel(lossModel);
+    phyHelper.SetErrorRateModel("ns3::YansErrorRateModel");
+    phyHelper.Set("TxPowerStart", DoubleValue(txPowerDbm));
+    phyHelper.Set("TxPowerEnd", DoubleValue(txPowerDbm));
+    phyHelper.Set("ChannelSettings", StringValue("{0, 20, BAND_5GHZ, 0}"));
+
+    WifiHelper wifiHelper;
+    wifiHelper.SetStandard(WIFI_STANDARD_80211be);
+    WifiMacHelper macHelper;
+    macHelper.SetType("ns3::AdhocWifiMac");
+
+    NetDeviceContainer devices = wifiHelper.Install(phyHelper, macHelper, interfererNodes);
+
+    // 網路協定 & IP 分配（實際上不需要真實通訊）
+    InternetStackHelper stack;
+    stack.Install(interfererNodes);
+    Ipv4AddressHelper ipv4;
+    ipv4.SetBase("10.3.0.0", "255.255.255.0");
+    ipv4.Assign(devices);
+
+    // 安裝 OnOff 應用產生干擾（傳給一個不存在的節點或廣播位址）
+    for (uint32_t i = 0; i < interfererNodes.GetN(); ++i)
+    {
+        OnOffHelper onoff("ns3::UdpSocketFactory",
+                          InetSocketAddress("255.255.255.255", 9999));
+        onoff.SetConstantRate(DataRate("100Mbps")); // 可依需求調整
+        onoff.SetAttribute("StartTime", TimeValue(Seconds(startTime)));
+        onoff.SetAttribute("StopTime", TimeValue(Seconds(stopTime)));
+        onoff.Install(interfererNodes.Get(i));
+    }
+
+    return interfererNodes;
+}
+
+
 
 /**
  * @param udp true if UDP is used, false if TCP is used
@@ -195,7 +255,6 @@ main(int argc, char* argv[])
     uint16_t auxPhyChWidth{20};
     bool auxPhyTxCapable{true};
     Time simulationTime{"10s"};
-    
     double frequency{5};  // whether the first link operates in the 2.4, 5 or 6 GHz
     double frequency2{0}; // whether the second link operates in the 2.4, 5 or 6 GHz (0 means no
                           // second link exists)
@@ -252,8 +311,8 @@ main(int argc, char* argv[])
               << "GI"
               << "\t\t\t"
               << "Throughput" << '\n';
-    uint8_t minMcs = 4;
-    uint8_t maxMcs = 4;
+    uint8_t minMcs = 1;
+    uint8_t maxMcs = 1;
 
     for (uint8_t mcs = minMcs; mcs <= maxMcs; ++mcs)
     {
@@ -283,11 +342,13 @@ main(int argc, char* argv[])
                 }
             // WiFi Node Create
                 NodeContainer wifiStaNodes;
-                wifiStaNodes.Create(nStations);
-                NodeContainer wifiApNode;
-                wifiApNode.Create(1);
-                NetDeviceContainer apDevice;
                 NetDeviceContainer staDevices;
+                wifiStaNodes.Create(nStations);
+
+                NodeContainer wifiApNode;
+                NetDeviceContainer apDevice;
+                wifiApNode.Create(1);
+                
                 WifiMacHelper mac;
                 WifiHelper wifi;
            
@@ -321,11 +382,9 @@ main(int argc, char* argv[])
                         Config::SetDefault("ns3::LogDistancePropagationLossModel::ReferenceLoss",
                                            DoubleValue(48));
                         wifi.SetRemoteStationManager(nLinks,
-                                                     "ns3::ConstantRateWifiManager",
-                                                     "DataMode",
-                                                     StringValue(dataModeStr),
-                                                     "ControlMode",
-                                                     StringValue(dataModeStr));
+                                                     "ns3::ConstantRateWifiManager",//Can't change Rate  for SNR
+                                                     "DataMode",StringValue(dataModeStr),
+                                                     "ControlMode",StringValue("EhtMcs0"));
                     }
                     else if (freq == 5)
                     {
@@ -369,7 +428,7 @@ main(int argc, char* argv[])
                 phy.Set("ChannelSwitchDelay", TimeValue(channelSwitchDelay));
             //error model
                 phy.SetErrorRateModel("ns3::YansErrorRateModel");
-
+                
 
                 mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(ssid));
                 mac.SetEmlsrManager(emlsrMgrTypeId,
@@ -391,14 +450,10 @@ main(int argc, char* argv[])
                 {
                     phy.Set(linkId, "ChannelSettings", StringValue(channelStr[linkId]));
 
-
                     auto spectrumChannel = CreateObject<MultiModelSpectrumChannel>();
-                    
                     
                     //signal loss model - have value ->get ptr:lossmodel
                     auto lossModel = CreateObject<LogDistancePropagationLossModel>();
-                    
-                    //add error  channel install lossmodel
                     spectrumChannel->AddPropagationLossModel(lossModel);
                     
                     phy.AddChannel(spectrumChannel, freqRanges[linkId]);
@@ -418,6 +473,7 @@ main(int argc, char* argv[])
                                               "AccessReqInterval",
                                               TimeValue(accessReqInterval));
                 }
+                
                 mac.SetType("ns3::ApWifiMac",
                             "EnableBeaconJitter",
                             BooleanValue(false),
@@ -443,6 +499,13 @@ main(int argc, char* argv[])
                 
                 mobilitySTA =InstallStaMove(maxRadius,nStations,wifiStaNodes);
                 mobilityAP = InstallApMove(wifiApNode);
+            //interferer
+                Ptr<SpectrumWifiPhy> interPhy;
+                double interfererDistance = 5.0;
+                double interfererPower = 20.0;
+                double simStartTime = 1.0;
+                double simStopTIme = 10.0;
+                NodeContainer interferers = CreateMultipleInterferers(4,interfererDistance,interfererPower,simStartTime,simStopTIme);
 
             /* Internet stack*/
                 InternetStackHelper stack;
@@ -500,7 +563,7 @@ main(int argc, char* argv[])
 
                         clientApp.Start(Seconds(1));
                         clientApp.Stop(simulationTime + Seconds(1));
-                        
+
                     //test
                         //serverApp.Get(0)->TraceConnect("Rx", "", MakeCallback(&RxTrace));
                         //Ptr<WifiNetDevice> dev = staDevices.Get(0)->GetObject<WifiNetDevice>();
