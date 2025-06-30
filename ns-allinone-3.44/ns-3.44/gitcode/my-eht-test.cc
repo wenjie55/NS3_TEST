@@ -228,6 +228,7 @@ NodeContainer CreateMultipleInterferers(std::string bandName, uint32_t numInterf
 
 
 
+
 void
 RxDropCallback(Ptr<const Packet> p, WifiPhyRxfailureReason reason)
 {
@@ -312,14 +313,21 @@ int main(int argc, char* argv[])
     
     bool useRts{false};
     uint16_t mpduBufferSize{512};
+    //TXOP
+    //bool TXOPsystem{true};
+    std::string txopLimit{"3520us,3520us,3520us"};
+    //OFDMA
+    //bool OFDMAsystem(false);
+    //EMLSR
     std::string emlsrMgrTypeId{"ns3::DefaultEmlsrManager"};
-    std::string emlsrLinks;
+    std::string emlsrLinks{"0,1,2"}; //3-link is EMLSR
     uint16_t paddingDelayUsec{32};
     uint16_t transitionDelayUsec{128};
     Time channelSwitchDelay{"100us"};
-    bool switchAuxPhy{true};
+    bool switchAuxPhy{false};//Aux Phy wait primary phy finish
     uint16_t auxPhyChWidth{20};
-    bool auxPhyTxCapable{true};
+    bool auxPhyTxCapable{true}; // Can UPlink ?
+
     Time simulationTime{"10s"};
     //simulation time (interference time)
     double simStartTime = 1.0;
@@ -416,13 +424,12 @@ int main(int argc, char* argv[])
                 NetDeviceContainer staDevices;
                 wifiStaNodes.Create(nStations);
 
-                NodeContainer wifiApNode;
+                NodeContainer wifiAPNode;
                 NetDeviceContainer apDevice;
-                wifiApNode.Create(1);
+                wifiAPNode.Create(1);
                 
                 WifiMacHelper mac;
                 WifiHelper wifi;
-           
                 
                 
                 wifi.SetStandard(WIFI_STANDARD_80211be);
@@ -489,19 +496,22 @@ int main(int argc, char* argv[])
                     }
                     nLinks++;
                 }
-
+                
                 
                 Ssid ssid = Ssid("ns3-80211be");
-
+                
             //PHY
                 SpectrumWifiPhyHelper phy(nLinks);
                 phy.SetPcapDataLinkType(WifiPhyHelper::DLT_IEEE802_11_RADIO);
                 phy.Set("ChannelSwitchDelay", TimeValue(channelSwitchDelay));
-                phy.Set("FixedPhyBand",BooleanValue(true));
             //error model
                 phy.SetErrorRateModel("ns3::YansErrorRateModel");
                 
-                mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(ssid));
+            //EMlsr     
+                mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(ssid),
+                "ActiveProbing",BooleanValue(false));
+
+                wifi.ConfigEhtOptions("EmlsrActivated",BooleanValue(true));
                 mac.SetEmlsrManager(emlsrMgrTypeId,
                                     "EmlsrLinkSet",
                                     StringValue(emlsrLinks),
@@ -515,6 +525,7 @@ int main(int argc, char* argv[])
                                     BooleanValue(auxPhyTxCapable),
                                     "AuxPhyChannelWidth",
                                     UintegerValue(auxPhyChWidth));
+
             //channel model install to link i  
                 
                 for (uint8_t linkId = 0; linkId < nLinks; linkId++)
@@ -535,16 +546,25 @@ int main(int argc, char* argv[])
 
             //install STA
                 staDevices = wifi.Install(phy, mac, wifiStaNodes);
+            //Open TXOP System
+            
+                
+                Ptr<NetDevice> dev;
+                Ptr<WifiNetDevice>wifi_dev;
+                PointerValue ptr;
+                Ptr<QosTxop> edca;
 
-                for(std::size_t i = 0; i < nStations; i++)
+                for(uint32_t i = 0; i < nStations;i++)
                 {
-                    Ptr<WifiNetDevice> dev = staDevices.Get(i)->GetObject<WifiNetDevice>();
-                    Ptr<WifiPhy> pp = dev->GetPhy();
-                    pp->TraceConnectWithoutContext("phyRxDrop",MakeCallback(&RxDropCallback));
+                    //open A-MPDU
+                    dev = wifiStaNodes.Get(i)->GetDevice(0);
+                    wifi_dev = DynamicCast<WifiNetDevice>(dev);
+                    wifi_dev->GetMac()->SetAttribute("BE_MaxAmpduSize", UintegerValue(32768));
+                    wifi_dev->GetMac()->SetAttribute("BE_MaxAmsduSize", UintegerValue(3839));
                 }
                 
-                //Ptr<WifiNetDevice> dev = staDevices.Get(0);
-                //std::cout << &dev <<"\n";
+                
+                
             //OFDMA(wait)
                 if (dlAckSeqType != "NO-OFDMA")
                 {
@@ -557,14 +577,26 @@ int main(int argc, char* argv[])
                                               TimeValue(accessReqInterval));
                 }
                 
-                mac.SetType("ns3::ApWifiMac",
-                            "EnableBeaconJitter",
-                            BooleanValue(false),
-                            "Ssid",
-                            SsidValue(ssid));
             //install AP
-                apDevice = wifi.Install(phy, mac, wifiApNode);
+                mac.SetType("ns3::ApWifiMac",
+                            "EnableBeaconJitter",BooleanValue(false),
+                            "Ssid",SsidValue(ssid));
+            // Modify EDCA
+                mac.SetEdca(AC_BE, "TxopLimits", StringValue(txopLimit));
+                mac.SetEdca(AC_BK, "TxopLimits", StringValue(txopLimit));
+                mac.SetEdca(AC_VO, "TxopLimits", StringValue(txopLimit));
+                mac.SetEdca(AC_VI,"TxopLimits", StringValue(txopLimit));
+                apDevice = wifi.Install(phy, mac, wifiAPNode);
 
+                dev = wifiAPNode.Get(0)->GetDevice(0);
+                wifi_dev = DynamicCast<WifiNetDevice>(dev);
+                wifi_dev->GetMac()->SetAttribute("BE_MaxAmpduSize", UintegerValue(32768));
+                wifi_dev->GetMac()->SetAttribute("BE_MaxAmsduSize", UintegerValue(3839));
+                //can use to get bit,
+                wifi_dev->GetMac()->GetAttribute("BE_Txop", ptr);
+                edca = ptr.Get<QosTxop>();
+                
+            //random number
                 int64_t streamNumber = 100;
                 streamNumber += WifiHelper::AssignStreams(apDevice, streamNumber);
                 streamNumber += WifiHelper::AssignStreams(staDevices, streamNumber);
@@ -581,7 +613,7 @@ int main(int argc, char* argv[])
                 MobilityHelper mobilityAP;
                 
                 mobilitySTA =InstallStaMove(maxRadius,nStations,wifiStaNodes);
-                mobilityAP = InstallApMove(wifiApNode);
+                mobilityAP = InstallApMove(wifiAPNode);
             //interferer
             
                 Ptr<SpectrumWifiPhy> interPhy;
@@ -595,9 +627,9 @@ int main(int argc, char* argv[])
                 
             /* Internet stack*/
                 InternetStackHelper stack;
-                stack.Install(wifiApNode);
+                stack.Install(wifiAPNode);
                 stack.Install(wifiStaNodes);
-                streamNumber += stack.AssignStreams(wifiApNode, streamNumber);
+                streamNumber += stack.AssignStreams(wifiAPNode, streamNumber);
                 streamNumber += stack.AssignStreams(wifiStaNodes, streamNumber);
 
                 Ipv4AddressHelper address;
@@ -610,7 +642,7 @@ int main(int argc, char* argv[])
              /* Setting applications */
                  
                 ApplicationContainer serverApp;
-                auto serverNodes = std::ref(wifiApNode);
+                auto serverNodes = std::ref(wifiAPNode);
                 Ipv4InterfaceContainer serverInterfaces;
                 NodeContainer clientNodes;
                 for (std::size_t i = 0; i < nStations; i++)
