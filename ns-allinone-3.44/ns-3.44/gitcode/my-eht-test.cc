@@ -41,8 +41,9 @@
 #include "ns3/network-module.h"
 #include "ns3/flow-monitor-helper.h"
 #include "ns3/ipv4-flow-classifier.h"
-
-
+#include "ns3/waveform-generator-helper.h"
+#include "ns3/waveform-generator.h"
+#include "ns3/non-communicating-net-device.h"
 
 #include <algorithm>
 #include <array>
@@ -216,15 +217,16 @@ NodeContainer CreateMultipleInterferers(std::string bandName, uint32_t numInterf
         
         onoff.SetAttribute("StartTime", TimeValue(Seconds(start))); 
         
-        onoff.SetAttribute("OnTime", StringValue("ns3::UniformRandomVariable[Min=0.2|Max=2.0])")); 
+        onoff.SetAttribute("OnTime", StringValue("ns3::UniformRandomVariable[Min=0.002|Max=2.0])")); 
         onoff.SetAttribute("OffTime", StringValue("ns3::UniformRandomVariable[Min=1.0|Max=2.5])"));
-
 
         onoff.Install(interfererNodes.Get(i));
     }
 
     return interfererNodes;
 }
+
+
 
 void
 RxDropCallback(Ptr<const Packet> p, WifiPhyRxfailureReason reason)
@@ -304,8 +306,7 @@ PrintIntermediateTput(std::vector<uint64_t>& rxBytes,
     }
 }
 
-int
-main(int argc, char* argv[])
+int main(int argc, char* argv[])
 {
     bool udp{true};
     
@@ -320,12 +321,16 @@ main(int argc, char* argv[])
     uint16_t auxPhyChWidth{20};
     bool auxPhyTxCapable{true};
     Time simulationTime{"10s"};
+    //simulation time (interference time)
+    double simStartTime = 1.0;
+    double simStopTIme = 10.0;
+
     double frequency{2.4};  // whether the first link operates in the 2.4, 5 or 6 GHz
     double frequency2{5}; // whether the second link operates in the 2.4, 5 or 6 GHz (0 means no
                           // second link exists)
     double frequency3{6}; // whether the third link operates in the 2.4, 5 or 6 GHz (0 means no third link exists)
     
-    std::size_t nStations{2};
+    std::size_t nStations{1};
     std::string dlAckSeqType{"NO-OFDMA"};
     bool enableUlOfdma{false};
     bool enableBsrp{false};
@@ -386,7 +391,7 @@ main(int argc, char* argv[])
     }
     
     int minChannelWidth = 20;
-    int maxChannelWidth = 40;
+    int maxChannelWidth = 20;
     
     int minGi = 800;
     int maxGi = 800;
@@ -492,9 +497,9 @@ main(int argc, char* argv[])
                 SpectrumWifiPhyHelper phy(nLinks);
                 phy.SetPcapDataLinkType(WifiPhyHelper::DLT_IEEE802_11_RADIO);
                 phy.Set("ChannelSwitchDelay", TimeValue(channelSwitchDelay));
+                phy.Set("FixedPhyBand",BooleanValue(true));
             //error model
                 phy.SetErrorRateModel("ns3::YansErrorRateModel");
-                Ptr<InterferenceHelper> interference = CreateObject<InterferenceHelper>();
                 
                 mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(ssid));
                 mac.SetEmlsrManager(emlsrMgrTypeId,
@@ -510,18 +515,18 @@ main(int argc, char* argv[])
                                     BooleanValue(auxPhyTxCapable),
                                     "AuxPhyChannelWidth",
                                     UintegerValue(auxPhyChWidth));
-            //channel model   
+            //channel model install to link i  
                 
                 for (uint8_t linkId = 0; linkId < nLinks; linkId++)
                 {
                     phy.Set(linkId, "ChannelSettings", StringValue(channelStr[linkId]));
-
+                
                     auto spectrumChannel = CreateObject<MultiModelSpectrumChannel>();
                     
                     //signal loss model - have value ->hidden node
                     auto lossModel = CreateObject<RangePropagationLossModel>();
                     lossModel->SetAttribute("MaxRange",DoubleValue((maxRadius)*1.2));
-
+                    // give channel my lossModel
                     spectrumChannel->AddPropagationLossModel(lossModel);
                     
 
@@ -530,12 +535,16 @@ main(int argc, char* argv[])
 
             //install STA
                 staDevices = wifi.Install(phy, mac, wifiStaNodes);
+
                 for(std::size_t i = 0; i < nStations; i++)
                 {
                     Ptr<WifiNetDevice> dev = staDevices.Get(i)->GetObject<WifiNetDevice>();
                     Ptr<WifiPhy> pp = dev->GetPhy();
                     pp->TraceConnectWithoutContext("phyRxDrop",MakeCallback(&RxDropCallback));
                 }
+                
+                //Ptr<WifiNetDevice> dev = staDevices.Get(0);
+                //std::cout << &dev <<"\n";
             //OFDMA(wait)
                 if (dlAckSeqType != "NO-OFDMA")
                 {
@@ -573,16 +582,17 @@ main(int argc, char* argv[])
                 
                 mobilitySTA =InstallStaMove(maxRadius,nStations,wifiStaNodes);
                 mobilityAP = InstallApMove(wifiApNode);
-            /*/interferer (can open or close -> use * between //)
+            //interferer
+            
                 Ptr<SpectrumWifiPhy> interPhy;
-                double interfererDistance = 30.0;
-                double interfererPower = 20.0;
-                double simStartTime = 1.0;
-                double simStopTIme = 10.0;
-                NodeContainer interferers2_4 = CreateMultipleInterferers("2.4GHz",3,interfererDistance,interfererPower,simStartTime,simStopTIme);
-                NodeContainer interferers5 = CreateMultipleInterferers("5GHz",3,interfererDistance,interfererPower,simStartTime,simStopTIme);
-                NodeContainer interferers6 = CreateMultipleInterferers("6GHz",3,interfererDistance,interfererPower,simStartTime,simStopTIme);
-            /*/
+                double interfererDistance = maxRadius/2;
+                u_int32_t interfererPower = 0;
+                u_int32_t interferNum = 3;
+
+                NodeContainer interferers2_4 = CreateMultipleInterferers("2.4GHz",interferNum,interfererDistance,interfererPower,simStartTime,simStopTIme);
+                NodeContainer interferers5 = CreateMultipleInterferers("5GHz",interferNum,interfererDistance,interfererPower,simStartTime,simStopTIme);
+                NodeContainer interferers6 = CreateMultipleInterferers("6GHz",interferNum,interfererDistance,interfererPower,simStartTime,simStopTIme);
+                
             /* Internet stack*/
                 InternetStackHelper stack;
                 stack.Install(wifiApNode);
@@ -632,14 +642,15 @@ main(int argc, char* argv[])
                         OnOffHelper onoff("ns3::UdpSocketFactory",
                                           InetSocketAddress(serverInterfaces.GetAddress(0), port));
                         onoff.SetAttribute("PacketSize", UintegerValue(payloadSize));
+                        
                         Ptr<UniformRandomVariable> onTime = CreateObject<UniformRandomVariable>();
                         onTime -> SetAttribute("Min",DoubleValue(1.0));
                         onTime -> SetAttribute("Max",DoubleValue(2.0));
                         onoff.SetAttribute("OnTime", PointerValue(onTime));
-
+                        onoff.SetAttribute("DataRate", DataRateValue(nonHtRefRateMbps * 1e6));
                         Ptr<UniformRandomVariable> offTime = CreateObject<UniformRandomVariable>();
                         offTime -> SetAttribute("Min",DoubleValue(0.5));
-                        offTime -> SetAttribute("Min",DoubleValue(1.0));
+                        offTime -> SetAttribute("Max",DoubleValue(1.0));
                         onoff.SetAttribute("OffTime", PointerValue(offTime));
                     
                         ApplicationContainer clientApp = onoff.Install(clientNodes.Get(i));
