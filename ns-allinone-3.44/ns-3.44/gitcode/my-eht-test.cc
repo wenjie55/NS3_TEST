@@ -54,8 +54,9 @@
 
 using namespace ns3;
 
-NS_LOG_COMPONENT_DEFINE("eht-wifi-network");
 
+NS_LOG_COMPONENT_DEFINE("eht-wifi-network");
+int64_t streamNumber = 100;
 
 //func
 MobilityHelper InstallApMove(NodeContainer wifiApNode)
@@ -217,16 +218,144 @@ NodeContainer CreateMultipleInterferers(std::string bandName, uint32_t numInterf
         
         onoff.SetAttribute("StartTime", TimeValue(Seconds(start))); 
         
-        onoff.SetAttribute("OnTime", StringValue("ns3::UniformRandomVariable[Min=0.002|Max=2.0])")); 
-        onoff.SetAttribute("OffTime", StringValue("ns3::UniformRandomVariable[Min=1.0|Max=2.5])"));
-
+        onoff.SetAttribute("OnTime", StringValue("ns3::UniformRandomVariable[Mu=0.0|Sigma=1.0][Min=0.002|Max=2.0])")); 
+        onoff.SetAttribute("OffTime", StringValue("ns3::UniformRandomVariable[Min=1.0|Max=2.0])"));
+    
         onoff.Install(interfererNodes.Get(i));
     }
 
     return interfererNodes;
 }
 
+NetDeviceContainer CreateInterferers(std::string bandName, uint32_t numInterferers, double radius, 
+                                Watt_u waveformPower,std::string freqSet)
+{
+    uint16_t freqRange;
+    BandInfo bandInfo;
+    Bands bands;
+    Ptr<SpectrumModel>SpectrumBand ;
+    if (bandName == "2.4GHz")
+    {
+        
+        freqRange = 2412;
+        bandInfo.fc = 2412e6;
+        bandInfo.fl = 2412e6 - 10e6;
+        bandInfo.fh = 2412e6 + 10e6;
+        bands.push_back(bandInfo);
+        SpectrumBand = Create<SpectrumModel>(bands);
+    }
+    else if (bandName == "5GHz")
+    {
+        freqRange = 5180;
+        bandInfo.fc = 5180e6;
+        bandInfo.fl = 5180e6 - 10e6;
+        bandInfo.fh = 5180e6 + 10e6;
+        bands.push_back(bandInfo);
+        SpectrumBand = Create<SpectrumModel>(bands);
 
+    }
+    else if (bandName == "6GHz")
+    {
+        freqRange = 5965;
+        bandInfo.fc = 5965e6;
+        bandInfo.fl = 5965e6 - 10e6;
+        bandInfo.fh = 5965e6 + 10e6;
+        bands.push_back(bandInfo);
+        SpectrumBand = Create<SpectrumModel>(bands);
+    }
+        
+    
+    NodeContainer interfererNodes;
+    interfererNodes.Create(numInterferers);
+    
+    SpectrumWifiPhyHelper spectrumPhy;
+    Ptr<MultiModelSpectrumChannel> SpectrumChannel = CreateObject<MultiModelSpectrumChannel>();
+    Ptr<FriisPropagationLossModel> lossModel = CreateObject<FriisPropagationLossModel>();
+    lossModel->SetFrequency(freqRange * 1e6);
+    SpectrumChannel->AddPropagationLossModel(lossModel);
+    Ptr<ConstantSpeedPropagationDelayModel> delayModel =CreateObject<ConstantSpeedPropagationDelayModel>();
+    SpectrumChannel->SetPropagationDelayModel(delayModel);
+
+    spectrumPhy.SetChannel(SpectrumChannel);
+    spectrumPhy.SetErrorRateModel("ns3::NistErrorRateModel");
+    spectrumPhy.Set("ChannelSettings",StringValue(freqSet));
+    Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator>();
+    for (uint32_t i = 0; i < numInterferers; ++i)
+    {
+        double angle = 2 * M_PI * i / numInterferers;
+        double x = radius * std::cos(angle);
+        double y = radius * std::sin(angle);
+        positionAlloc->Add(Vector(x, y, 0.0));
+    }
+    MobilityHelper mobility;
+    mobility.SetPositionAllocator(positionAlloc);
+    mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+    mobility.Install(interfererNodes);
+    
+    Ptr<SpectrumValue> wgPsd = Create<SpectrumValue>(SpectrumBand);
+    *wgPsd = waveformPower/20e6;
+    
+    WaveformGeneratorHelper waveformGeneratorHelper;
+    waveformGeneratorHelper.SetChannel(SpectrumChannel);
+    waveformGeneratorHelper.SetTxPowerSpectralDensity(wgPsd);
+
+    waveformGeneratorHelper.SetPhyAttribute("Period", TimeValue(Seconds(0.0007)));
+    waveformGeneratorHelper.SetPhyAttribute("DutyCycle", DoubleValue(1));
+    NetDeviceContainer waveformGeneratorDevices = waveformGeneratorHelper.Install(interfererNodes);
+ //-----------------   
+    // Ptr<UniformRandomVariable> onTimeVar = CreateObject<UniformRandomVariable>();
+    //             onTimeVar -> SetAttribute("Min",DoubleValue(0.02));
+    //             onTimeVar -> SetAttribute("Max",DoubleValue(1.0));
+
+    //             Ptr<UniformRandomVariable> offTimeVar = CreateObject<UniformRandomVariable>();
+    //             offTimeVar -> SetAttribute("Min",DoubleValue(0.5));
+    //             offTimeVar -> SetAttribute("Max",DoubleValue(1.0));
+    // double currentTime2_4 = 0.0;
+                // while(currentTime2_4 < 10)
+                // {
+                    // double onTime = onTimeVar-> GetValue();
+                    // double offTime = offTimeVar -> GetValue();
+                    // Simulator::Schedule(Seconds(0.002),
+                    //                        &WaveformGenerator::Start,
+                    //                        waveformGeneratorDevices.Get(0)
+                    //                            ->GetObject<NonCommunicatingNetDevice>()
+                    //                            ->GetPhy()
+                    //                            ->GetObject<WaveformGenerator>());
+                   
+
+                    // Simulator::Schedule(Seconds(currentTime2_4 + onTime),
+                    //                     &WaveformGenerator::Stop,
+                    //                     waveformGeneratorDevices.Get(1)
+                    //                         ->GetObject<NonCommunicatingNetDevice>()
+                    //                         ->GetPhy()
+                    //                         ->GetObject<WaveformGenerator>());
+                //     currentTime2_4 += (onTime + offTime);
+                // }
+    return waveformGeneratorDevices;
+}
+ApplicationContainer CreateClientFlow(UintegerValue ACLevel, UintegerValue payloadSize, uint64_t DataRate, InetSocketAddress dest, NodeContainer STA,
+                                      DoubleValue ontimeStart, DoubleValue onTimeEnd, DoubleValue offTimeStart, DoubleValue offTimeEnd)
+{
+  //{0x70, 0x28, 0xb8, 0xc0}; // AC_BE, AC_BK, AC_VI, AC_VO
+  OnOffHelper onoff("ns3::UdpSocketFactory", dest);
+  onoff.SetAttribute("PacketSize", UintegerValue(payloadSize));
+  
+  onoff.SetAttribute("DataRate", DataRateValue(DataRate * 1e6));
+  onoff.SetAttribute("Tos",UintegerValue(ACLevel));
+  Ptr<UniformRandomVariable> onTime = CreateObject<UniformRandomVariable>();
+  onTime -> SetAttribute("Min",DoubleValue(ontimeStart));
+  onTime -> SetAttribute("Max",DoubleValue(onTimeEnd));
+  onoff.SetAttribute("OnTime", PointerValue(onTime));
+
+  Ptr<UniformRandomVariable> offTime = CreateObject<UniformRandomVariable>();
+  offTime -> SetAttribute("Min",DoubleValue(offTimeStart));
+  offTime -> SetAttribute("Max",DoubleValue(offTimeEnd));
+
+  onoff.SetAttribute("OffTime", PointerValue(offTime));
+  ApplicationContainer clientApp = onoff.Install(STA);
+  streamNumber += onoff.AssignStreams(STA,streamNumber);
+  return clientApp;
+}
 
 
 void
@@ -315,12 +444,12 @@ int main(int argc, char* argv[])
     uint16_t mpduBufferSize{512};
     //TXOP
     //bool TXOPsystem{true};
-    std::string txopLimit{"3520us,3520us,3520us"};
+    std::string txopLimit{"3200us,3200us,3200us"};
     //OFDMA
     //bool OFDMAsystem(false);
     //EMLSR
     std::string emlsrMgrTypeId{"ns3::DefaultEmlsrManager"};
-    std::string emlsrLinks{"0,1,2"}; //3-link is EMLSR
+    std::string emlsrLinks{"0,1,2"}; //3link is EMLSR
     uint16_t paddingDelayUsec{32};
     uint16_t transitionDelayUsec{128};
     Time channelSwitchDelay{"100us"};
@@ -330,15 +459,15 @@ int main(int argc, char* argv[])
 
     Time simulationTime{"10s"};
     //simulation time (interference time)
-    double simStartTime = 1.0;
-    double simStopTIme = 10.0;
+    // double simStartTime = 1.0;
+    // double simStopTIme = 10.0;
 
     double frequency{2.4};  // whether the first link operates in the 2.4, 5 or 6 GHz
     double frequency2{5}; // whether the second link operates in the 2.4, 5 or 6 GHz (0 means no
                           // second link exists)
     double frequency3{6}; // whether the third link operates in the 2.4, 5 or 6 GHz (0 means no third link exists)
     
-    std::size_t nStations{1};
+    std::size_t nStations{2};
     std::string dlAckSeqType{"NO-OFDMA"};
     bool enableUlOfdma{false};
     bool enableBsrp{false};
@@ -390,13 +519,9 @@ int main(int argc, char* argv[])
               << "GI"
               << "\t\t\t"
               << "Throughput" << '\n';
-    uint8_t minMcs = 1;
-    uint8_t maxMcs = 1;
-
-    for (uint8_t mcs = minMcs; mcs <= maxMcs; ++mcs)
-    {
-        mcsValues.push_back(mcs);
-    }
+    //----------------------------------------
+    uint8_t mcs = 2;
+    mcsValues.push_back(mcs); 
     
     int minChannelWidth = 20;
     int maxChannelWidth = 20;
@@ -508,8 +633,10 @@ int main(int argc, char* argv[])
                 phy.SetErrorRateModel("ns3::YansErrorRateModel");
                 
             //EMlsr     
-                mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(ssid),
-                "ActiveProbing",BooleanValue(false));
+                mac.SetType("ns3::StaWifiMac", 
+                            "Ssid", SsidValue(ssid),
+                            "QosSupported", BooleanValue(true),
+                            "ActiveProbing",BooleanValue(false));
 
                 wifi.ConfigEhtOptions("EmlsrActivated",BooleanValue(true));
                 mac.SetEmlsrManager(emlsrMgrTypeId,
@@ -580,7 +707,9 @@ int main(int argc, char* argv[])
             //install AP
                 mac.SetType("ns3::ApWifiMac",
                             "EnableBeaconJitter",BooleanValue(false),
+                            "QosSupported", BooleanValue(true),
                             "Ssid",SsidValue(ssid));
+
             // Modify EDCA
                 mac.SetEdca(AC_BE, "TxopLimits", StringValue(txopLimit));
                 mac.SetEdca(AC_BK, "TxopLimits", StringValue(txopLimit));
@@ -597,7 +726,6 @@ int main(int argc, char* argv[])
                 edca = ptr.Get<QosTxop>();
                 
             //random number
-                int64_t streamNumber = 100;
                 streamNumber += WifiHelper::AssignStreams(apDevice, streamNumber);
                 streamNumber += WifiHelper::AssignStreams(staDevices, streamNumber);
 
@@ -616,14 +744,81 @@ int main(int argc, char* argv[])
                 mobilityAP = InstallApMove(wifiAPNode);
             //interferer
             
-                Ptr<SpectrumWifiPhy> interPhy;
-                double interfererDistance = maxRadius/2;
-                u_int32_t interfererPower = 0;
-                u_int32_t interferNum = 3;
+                // Ptr<SpectrumWifiPhy> interPhy;
+                // u_int32_t interfererPower = 0;
+                // u_int32_t interferNum = 3;
+                
 
-                NodeContainer interferers2_4 = CreateMultipleInterferers("2.4GHz",interferNum,interfererDistance,interfererPower,simStartTime,simStopTIme);
-                NodeContainer interferers5 = CreateMultipleInterferers("5GHz",interferNum,interfererDistance,interfererPower,simStartTime,simStopTIme);
-                NodeContainer interferers6 = CreateMultipleInterferers("6GHz",interferNum,interfererDistance,interfererPower,simStartTime,simStopTIme);
+                // NetDeviceContainer interferers2_4 = CreateInterferers("2.4GHz",interferNum, maxRadius,interfererPower,channelStr[0]);
+                // NetDeviceContainer interferers5 = CreateInterferers("5GHz",interferNum, maxRadius,interfererPower,channelStr[1]);
+                // NetDeviceContainer interferers6 = CreateInterferers("6GHz",interferNum, maxRadius,interfererPower,channelStr[2]);
+                
+                // Ptr<UniformRandomVariable> onTimeVar = CreateObject<UniformRandomVariable>();
+                // onTimeVar -> SetAttribute("Min",DoubleValue(0.02));
+                // onTimeVar -> SetAttribute("Max",DoubleValue(1.0));
+
+                // Ptr<UniformRandomVariable> offTimeVar = CreateObject<UniformRandomVariable>();
+                // offTimeVar -> SetAttribute("Min",DoubleValue(0.5));
+                // offTimeVar -> SetAttribute("Max",DoubleValue(1.0));
+
+                // for(u_int32_t i = 0; i < interferNum; i++)
+                // {
+                // double currentTime2_4 = 0.0;
+                // while(currentTime2_4 < simStopTIme)
+                // {
+                //     double onTime = onTimeVar-> GetValue();
+                //     double offTime = offTimeVar -> GetValue();
+                //      Simulator::Schedule(Seconds(onTime),
+                //                         &WaveformGenerator::Start,
+                //                         interferers2_4.Get(i)
+                //                             ->GetObject<NonCommunicatingNetDevice>()
+                //                             ->GetPhy()
+                //                             ->GetObject<WaveformGenerator>());
+
+                //     Simulator::Schedule(Seconds(currentTime2_4 + onTime),
+                //                         &WaveformGenerator::Stop,
+                //                         interferers2_4.Get(i)
+                //                             ->GetObject<NonCommunicatingNetDevice>()
+                //                             ->GetPhy()
+                //                             ->GetObject<WaveformGenerator>());
+                //     currentTime2_4 += (onTime + offTime);
+                // }    
+                // double currentTime5 = 0;
+                // while(currentTime5 < simStopTIme)
+                // {
+                //     double onTime = onTimeVar-> GetValue();
+                //     double offTime = offTimeVar -> GetValue();
+                //     Simulator::Schedule(Seconds(currentTime5),&WaveformGenerator::Start,
+                //                         interferers5.Get(i)
+                //                             ->GetObject<NonCommunicatingNetDevice>()
+                //                             ->GetPhy()
+                //                             ->GetObject<WaveformGenerator>());
+
+                //     Simulator::Schedule(Seconds(currentTime5 + onTime),&WaveformGenerator::Stop,
+                //                         interferers5.Get(i)
+                //                             ->GetObject<NonCommunicatingNetDevice>()
+                //                             ->GetPhy()
+                //                             ->GetObject<WaveformGenerator>());
+                //     currentTime5 += (onTime + offTime);
+                // }
+                // double currentTime6 = 0;
+                // while(currentTime6 < simStopTIme)
+                // {
+                //     double onTime = onTimeVar-> GetValue();
+                //     double offTime = offTimeVar -> GetValue();
+                //     Simulator::Schedule(Seconds(currentTime6),&WaveformGenerator::Start,
+                //                         interferers6.Get(i)
+                //                             ->GetObject<NonCommunicatingNetDevice>()
+                //                             ->GetPhy()
+                //                             ->GetObject<WaveformGenerator>());
+                //     Simulator::Schedule(Seconds(currentTime6 + onTime),&WaveformGenerator::Stop,
+                //                         interferers6.Get(i)
+                //                             ->GetObject<NonCommunicatingNetDevice>()
+                //                             ->GetPhy()
+                //                             ->GetObject<WaveformGenerator>());
+                //     currentTime6 += (onTime + offTime);
+                // }
+                // }
                 
             /* Internet stack*/
                 InternetStackHelper stack;
@@ -631,7 +826,8 @@ int main(int argc, char* argv[])
                 stack.Install(wifiStaNodes);
                 streamNumber += stack.AssignStreams(wifiAPNode, streamNumber);
                 streamNumber += stack.AssignStreams(wifiStaNodes, streamNumber);
-
+         
+            //Assign address
                 Ipv4AddressHelper address;
                 address.SetBase("192.168.1.0", "255.255.255.0");
                 Ipv4InterfaceContainer staNodeInterfaces;
@@ -644,7 +840,9 @@ int main(int argc, char* argv[])
                 ApplicationContainer serverApp;
                 auto serverNodes = std::ref(wifiAPNode);
                 Ipv4InterfaceContainer serverInterfaces;
+
                 NodeContainer clientNodes;
+                
                 for (std::size_t i = 0; i < nStations; i++)
                 {
                     serverInterfaces.Add(apNodeInterface.Get(0));
@@ -659,38 +857,39 @@ int main(int argc, char* argv[])
                                      nStations;
                 if (udp)
                 {
-                    // UDP flow
+                    //server & Client connect 
                     uint16_t port = 9;
                     UdpServerHelper server(port);
                     serverApp = server.Install(serverNodes.get());
                     streamNumber += server.AssignStreams(serverNodes.get(), streamNumber);
-
+                    //server open time
                     serverApp.Start(Seconds(0));
                     serverApp.Stop(simulationTime + Seconds(1));
                     //const auto packetInterval = payloadSize * 8.0 / maxLoad;
-
+                    InetSocketAddress dest(serverInterfaces.GetAddress(0),port);
                     for (std::size_t i = 0; i < nStations; i++)
-                    {
-                        OnOffHelper onoff("ns3::UdpSocketFactory",
-                                          InetSocketAddress(serverInterfaces.GetAddress(0), port));
-                        onoff.SetAttribute("PacketSize", UintegerValue(payloadSize));
-                        
-                        Ptr<UniformRandomVariable> onTime = CreateObject<UniformRandomVariable>();
-                        onTime -> SetAttribute("Min",DoubleValue(1.0));
-                        onTime -> SetAttribute("Max",DoubleValue(2.0));
-                        onoff.SetAttribute("OnTime", PointerValue(onTime));
-                        onoff.SetAttribute("DataRate", DataRateValue(nonHtRefRateMbps * 1e6));
-                        Ptr<UniformRandomVariable> offTime = CreateObject<UniformRandomVariable>();
-                        offTime -> SetAttribute("Min",DoubleValue(0.5));
-                        offTime -> SetAttribute("Max",DoubleValue(1.0));
-                        onoff.SetAttribute("OffTime", PointerValue(offTime));
-                    
-                        ApplicationContainer clientApp = onoff.Install(clientNodes.Get(i));
-                        streamNumber += onoff.AssignStreams(clientNodes.Get(i), streamNumber);
+                    {   //{0x70, 0x28, 0xb8, 0xc0}; // AC_BE, AC_BK, AC_VI, AC_VO
 
-                        clientApp.Start(Seconds(1.0 + i*0.5));
-                        clientApp.Stop(simulationTime + Seconds(1));
-
+                        //BE
+                        // ApplicationContainer clientAppBE = CreateClientFlow(0x70, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
+                        //                                                     0.015,0.025,0,0.005);
+                        // clientAppBE.Start(Seconds(1.0 + i*0.1));
+                        // clientAppBE.Stop(simulationTime + Seconds(1));
+                        // //BK
+                        // ApplicationContainer clientAppBK = CreateClientFlow(0x28, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
+                        //                                                     0.03,0.05,0,0.01);
+                        // clientAppBE.Start(Seconds(1.0 + i*0.1));
+                        // clientAppBE.Stop(simulationTime + Seconds(1));
+                        // //VI
+                        ApplicationContainer clientAppVI = CreateClientFlow(0xb8, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
+                                                                            0.2,1,0.1,2);
+                        clientAppVI.Start(Seconds(1.0 + i*0.1));
+                        clientAppVI.Stop(simulationTime + Seconds(1));
+                        // //VO
+                        ApplicationContainer clientAppVO = CreateClientFlow(0xc0, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
+                                                                            0.5,1,1,2);
+                        clientAppVO.Start(Seconds(1.0 + i*0.1));
+                        clientAppVO.Stop(simulationTime + Seconds(1));
                     //test
                         //serverApp.Get(0)->TraceConnect("Rx", "", MakeCallback(&RxTrace));
                         //Ptr<WifiNetDevice> dev = staDevices.Get(0)->GetObject<WifiNetDevice>();
