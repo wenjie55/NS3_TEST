@@ -342,6 +342,7 @@ ApplicationContainer CreateClientFlow(UintegerValue ACLevel, UintegerValue paylo
   
   onoff.SetAttribute("DataRate", DataRateValue(DataRate * 1e6));
   onoff.SetAttribute("Tos",UintegerValue(ACLevel));
+
   Ptr<UniformRandomVariable> onTime = CreateObject<UniformRandomVariable>();
   onTime -> SetAttribute("Min",DoubleValue(ontimeStart));
   onTime -> SetAttribute("Max",DoubleValue(onTimeEnd));
@@ -352,6 +353,7 @@ ApplicationContainer CreateClientFlow(UintegerValue ACLevel, UintegerValue paylo
   offTime -> SetAttribute("Max",DoubleValue(offTimeEnd));
 
   onoff.SetAttribute("OffTime", PointerValue(offTime));
+  
   ApplicationContainer clientApp = onoff.Install(STA);
   streamNumber += onoff.AssignStreams(STA,streamNumber);
   return clientApp;
@@ -638,7 +640,8 @@ int main(int argc, char* argv[])
                             "QosSupported", BooleanValue(true),
                             "ActiveProbing",BooleanValue(false));
 
-                wifi.ConfigEhtOptions("EmlsrActivated",BooleanValue(true));
+                wifi.ConfigEhtOptions("EmlsrActivated",BooleanValue(false));
+
                 mac.SetEmlsrManager(emlsrMgrTypeId,
                                     "EmlsrLinkSet",
                                     StringValue(emlsrLinks),
@@ -666,7 +669,6 @@ int main(int argc, char* argv[])
                     lossModel->SetAttribute("MaxRange",DoubleValue((maxRadius)*1.2));
                     // give channel my lossModel
                     spectrumChannel->AddPropagationLossModel(lossModel);
-                    
 
                     phy.AddChannel(spectrumChannel, freqRanges[linkId]);
                 }
@@ -830,10 +832,9 @@ int main(int argc, char* argv[])
             //Assign address
                 Ipv4AddressHelper address;
                 address.SetBase("192.168.1.0", "255.255.255.0");
-                Ipv4InterfaceContainer staNodeInterfaces;
-                Ipv4InterfaceContainer apNodeInterface;
-                staNodeInterfaces = address.Assign(staDevices);
-                apNodeInterface = address.Assign(apDevice);
+                Ipv4InterfaceContainer staNodeInterfaces = address.Assign(staDevices);
+                Ipv4InterfaceContainer apNodeInterface = address.Assign(apDevice);;
+         
 
              /* Setting applications */
                  
@@ -843,7 +844,7 @@ int main(int argc, char* argv[])
 
                 NodeContainer clientNodes;
                 
-                for (std::size_t i = 0; i < nStations; i++)
+                for (std::size_t i = 0; i < nStations; ++i)
                 {
                     serverInterfaces.Add(apNodeInterface.Get(0));
                     clientNodes.Add(wifiStaNodes.Get(i));
@@ -867,28 +868,31 @@ int main(int argc, char* argv[])
                     serverApp.Stop(simulationTime + Seconds(1));
                     //const auto packetInterval = payloadSize * 8.0 / maxLoad;
                     InetSocketAddress dest(serverInterfaces.GetAddress(0),port);
-                    for (std::size_t i = 0; i < nStations; i++)
-                    {   //{0x70, 0x28, 0xb8, 0xc0}; // AC_BE, AC_BK, AC_VI, AC_VO
 
+                    for (std::size_t i = 0; i < nStations; i++)
+                    {   
+                        AddressValue remoteAddress(dest);
+                        
+                        //{0x70, 0x28, 0xb8, 0xc0}; // AC_BE, AC_BK, AC_VI, AC_VO
                         //BE
                         // ApplicationContainer clientAppBE = CreateClientFlow(0x70, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
                         //                                                     0.015,0.025,0,0.005);
-                        // clientAppBE.Start(Seconds(1.0 + i*0.1));
+                        // clientAppBE.Start(Seconds(1.0 ) + MicroSeconds(i * 100));
                         // clientAppBE.Stop(simulationTime + Seconds(1));
                         // //BK
                         // ApplicationContainer clientAppBK = CreateClientFlow(0x28, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
                         //                                                     0.03,0.05,0,0.01);
-                        // clientAppBE.Start(Seconds(1.0 + i*0.1));
+                        // clientAppBE.Start(Seconds(1.0 ) + MicroSeconds(i * 100));
                         // clientAppBE.Stop(simulationTime + Seconds(1));
                         // //VI
                         ApplicationContainer clientAppVI = CreateClientFlow(0xb8, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
                                                                             0.2,1,0.1,2);
-                        clientAppVI.Start(Seconds(1.0 + i*0.1));
+                        clientAppVI.Start(Seconds(1.0) + MicroSeconds(i * 100));
                         clientAppVI.Stop(simulationTime + Seconds(1));
                         // //VO
                         ApplicationContainer clientAppVO = CreateClientFlow(0xc0, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
                                                                             0.5,1,1,2);
-                        clientAppVO.Start(Seconds(1.0 + i*0.1));
+                        clientAppVO.Start(Seconds(1.0 ) + MicroSeconds(i * 100));
                         clientAppVO.Stop(simulationTime + Seconds(1));
                     //test
                         //serverApp.Get(0)->TraceConnect("Rx", "", MakeCallback(&RxTrace));
