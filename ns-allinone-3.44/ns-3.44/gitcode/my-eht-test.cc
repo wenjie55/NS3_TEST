@@ -44,6 +44,7 @@
 #include "ns3/waveform-generator-helper.h"
 #include "ns3/waveform-generator.h"
 #include "ns3/non-communicating-net-device.h"
+#include "ns3/wifi-phy-common.h"
 
 #include <algorithm>
 #include <array>
@@ -56,8 +57,9 @@ using namespace ns3;
 
 
 NS_LOG_COMPONENT_DEFINE("eht-wifi-network");
-int64_t streamNumber = 100;
 
+int64_t streamNumber = 100;
+int64_t g_rxCounter = 0;
 //func
 MobilityHelper InstallApMove(NodeContainer wifiApNode)
 {
@@ -100,16 +102,6 @@ MobilityHelper InstallStaMove(double maxRadius, uint32_t nwifiSTA, NodeContainer
                               RectangleValue(Rectangle(-maxRadius, maxRadius, -maxRadius, maxRadius)));
     mobilitysta.Install(wifiStaNodes);
     return mobilitysta;
-}
-// packet receive
-void RxTrace(std::string context, Ptr<const Packet> packet)
-{
-    std::cout << Simulator::Now().GetSeconds() << "s: Packet received" << std::endl;
-}
-// sta SNR
-void MyRxCallback(Ptr<const WifiPsdu> psdu, RxSignalInfo info, const WifiTxVector &txvector,const std::vector<bool> &mpduStatus)
-{
-    std::cout << "packet get SNR: " << info.snr <<"dB"<< std::endl;
 }
 
 NodeContainer CreateMultipleInterferers(std::string bandName, uint32_t numInterferers, double radius,
@@ -291,7 +283,10 @@ NetDeviceContainer CreateInterferers(std::string bandName, uint32_t numInterfere
     mobility.SetPositionAllocator(positionAlloc);
     mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
     mobility.Install(interfererNodes);
-    
+    // Ptr<LogNormalRandomVariable> InRv = CreateObject<LogNormalRandomVariable>();
+    // InRv->SetAttribute("Mu",DoubleValue(std::log(waveformPower)));
+    // InRv->SetAttribute("sigma",DoubleValue(1.5));
+    // double noistPower = InRv->GetValue();
     Ptr<SpectrumValue> wgPsd = Create<SpectrumValue>(SpectrumBand);
     *wgPsd = waveformPower/20e6;
     
@@ -302,37 +297,10 @@ NetDeviceContainer CreateInterferers(std::string bandName, uint32_t numInterfere
     waveformGeneratorHelper.SetPhyAttribute("Period", TimeValue(Seconds(0.0007)));
     waveformGeneratorHelper.SetPhyAttribute("DutyCycle", DoubleValue(1));
     NetDeviceContainer waveformGeneratorDevices = waveformGeneratorHelper.Install(interfererNodes);
- //-----------------   
-    // Ptr<UniformRandomVariable> onTimeVar = CreateObject<UniformRandomVariable>();
-    //             onTimeVar -> SetAttribute("Min",DoubleValue(0.02));
-    //             onTimeVar -> SetAttribute("Max",DoubleValue(1.0));
 
-    //             Ptr<UniformRandomVariable> offTimeVar = CreateObject<UniformRandomVariable>();
-    //             offTimeVar -> SetAttribute("Min",DoubleValue(0.5));
-    //             offTimeVar -> SetAttribute("Max",DoubleValue(1.0));
-    // double currentTime2_4 = 0.0;
-                // while(currentTime2_4 < 10)
-                // {
-                    // double onTime = onTimeVar-> GetValue();
-                    // double offTime = offTimeVar -> GetValue();
-                    // Simulator::Schedule(Seconds(0.002),
-                    //                        &WaveformGenerator::Start,
-                    //                        waveformGeneratorDevices.Get(0)
-                    //                            ->GetObject<NonCommunicatingNetDevice>()
-                    //                            ->GetPhy()
-                    //                            ->GetObject<WaveformGenerator>());
-                   
-
-                    // Simulator::Schedule(Seconds(currentTime2_4 + onTime),
-                    //                     &WaveformGenerator::Stop,
-                    //                     waveformGeneratorDevices.Get(1)
-                    //                         ->GetObject<NonCommunicatingNetDevice>()
-                    //                         ->GetPhy()
-                    //                         ->GetObject<WaveformGenerator>());
-                //     currentTime2_4 += (onTime + offTime);
-                // }
     return waveformGeneratorDevices;
 }
+
 ApplicationContainer CreateClientFlow(UintegerValue ACLevel, UintegerValue payloadSize, uint64_t DataRate, InetSocketAddress dest, NodeContainer STA,
                                       DoubleValue ontimeStart, DoubleValue onTimeEnd, DoubleValue offTimeStart, DoubleValue offTimeEnd)
 {
@@ -359,12 +327,97 @@ ApplicationContainer CreateClientFlow(UintegerValue ACLevel, UintegerValue paylo
   return clientApp;
 }
 
+void 
+MyRxCallback(Ptr<const WifiPsdu> psdu, RxSignalInfo info, const WifiTxVector &txvector,const std::vector<bool> &mpduStatus)
+{
+    std::cout << "packet get SNR: " << info.snr <<"dB"<< std::endl;
+}
+// packet receive
 
 void
 RxDropCallback(Ptr<const Packet> p, WifiPhyRxfailureReason reason)
 {
-    std::cout<<"\n[RxDrop] Packet UID = "<< p->GetUid() <<", Reason=" << reason << std::endl;
+    std::cout << "----------------------------" << "\n";
+    //Happen time
+    std::cout << "[PHY DROP time]: "
+              << Simulator::Now().GetSeconds()<<"s";
+    std::cout <<"\n[RxDrop] Packet UID = "<< p->GetUid() <<", Reason = " << reason <<"\n"<< std::endl;
+    
 }
+void
+MyDropCallback(std::string context,Ptr<const Packet> p, WifiPhyRxfailureReason reason)
+{
+    std::cout << "\n[PHY DROP time]: "
+              << Simulator::Now().GetSeconds()<<"s";
+    //std::cout <<"\n[RxDrop] Context = " << context << "\n Packet UID = " << p->GetUid() << ", Reason = " << reason<<std::endl;
+    std::size_t devIndex = context.find("DeviceList/");
+    uint32_t nodeId = 999;
+    uint32_t devId = 999;
+
+    if(devIndex != std::string::npos)
+    {
+        sscanf(context.c_str(),"/NodeList/%u/DeviceList/%u",&nodeId,&devId);
+        std::cout<<" nodeId : " << nodeId << "\tdevId : " << devId <<std::endl;
+    }
+    WifiMacHeader hdr;
+    Mac48Address src;
+    Mac48Address dst;
+
+    Ptr<Packet> pktCopy = p->Copy();
+    if(pktCopy->PeekHeader(hdr))
+    {
+        src = hdr.GetAddr2();
+        dst = hdr.GetAddr1();
+        std::cout << " src : " << src <<"\n";
+        std::cout << " dst : " << dst <<"\n";
+    }
+    else
+    {
+        std::cout << " MACHeader error!\n";
+    }
+
+    // LinkId
+    Ptr<Node>  node = NodeList::GetNode(nodeId);
+    Ptr<NetDevice> netDev = node->GetDevice(devId);
+    Ptr<WifiNetDevice> wifiDev = DynamicCast<WifiNetDevice>(netDev);
+    Ptr<WifiMac> mac = wifiDev->GetMac();
+
+    uint8_t trueLinkId;
+    Mac48Address trueMacAddr;
+    for(uint8_t Linkid = 0; Linkid <std::max<uint8_t>(wifiDev->GetNPhys(),1);++Linkid)
+    {
+        auto fem = mac->GetFrameExchangeManager(Linkid);
+        std::cout<<" Device :" << nodeId << " LinkId :" << std::to_string(Linkid) 
+                 << " mac address : " << fem->GetAddress() <<"\n";
+        if(src == fem->GetAddress())
+        {
+            trueLinkId = Linkid;
+            trueMacAddr = fem->GetAddress();
+        }
+    }
+    std::cout << " trueLinkId : " << trueLinkId << " trueMacAddr : " <<trueMacAddr <<std::endl;
+}
+//wifi backoff->access-> Tx
+void
+MyBackoffTrace(uint32_t slots)
+{
+    std::cout <<"Backoff Started with" << slots << " slots at "<<Simulator::Now().GetSeconds()<<"s\n";
+}
+
+void
+MyTxStartTrace()
+{
+    std::cout <<"[ Access channel] at : " << Simulator::Now().GetSeconds() <<"s\n";
+}
+
+void
+MyPhyTxBeginTrace(Ptr<const Packet>  p )
+{
+    std::cout <<"[Tx] packet starts transmitting at " <<  Simulator::Now().GetSeconds();
+}
+
+
+
 
 /**
  * @param udp true if UDP is used, false if TCP is used
@@ -441,8 +494,10 @@ PrintIntermediateTput(std::vector<uint64_t>& rxBytes,
 int main(int argc, char* argv[])
 {
     bool udp{true};
-    
-    bool useRts{false};
+    bool intterf(false);
+    bool useRts{true};
+    bool flowinfo{false};
+    bool STAaddr_linkid(false);
     uint16_t mpduBufferSize{512};
     //TXOP
     //bool TXOPsystem{true};
@@ -459,10 +514,9 @@ int main(int argc, char* argv[])
     uint16_t auxPhyChWidth{20};
     bool auxPhyTxCapable{true}; // Can UPlink ?
 
-    Time simulationTime{"10s"};
+    Time simulationTime{"5s"};
     //simulation time (interference time)
     // double simStartTime = 1.0;
-    // double simStopTIme = 10.0;
 
     double frequency{2.4};  // whether the first link operates in the 2.4, 5 or 6 GHz
     double frequency2{5}; // whether the second link operates in the 2.4, 5 or 6 GHz (0 means no
@@ -483,6 +537,7 @@ int main(int argc, char* argv[])
     double maxRadius = 50.0;
 
     CommandLine cmd(__FILE__);
+    //wait->connection Drop
     
     cmd.Parse(argc, argv);
 
@@ -547,13 +602,14 @@ int main(int argc, char* argv[])
                     Config::SetDefault("ns3::TcpSocket::SegmentSize", UintegerValue(payloadSize));
                 }
             // WiFi Node Create
+                NodeContainer wifiAPNode;
+                NetDeviceContainer apDevice;
+                wifiAPNode.Create(1);
+
                 NodeContainer wifiStaNodes;
                 NetDeviceContainer staDevices;
                 wifiStaNodes.Create(nStations);
 
-                NodeContainer wifiAPNode;
-                NetDeviceContainer apDevice;
-                wifiAPNode.Create(1);
                 
                 WifiMacHelper mac;
                 WifiHelper wifi;
@@ -745,83 +801,85 @@ int main(int argc, char* argv[])
                 mobilitySTA =InstallStaMove(maxRadius,nStations,wifiStaNodes);
                 mobilityAP = InstallApMove(wifiAPNode);
             //interferer
-            
-                // Ptr<SpectrumWifiPhy> interPhy;
-                // u_int32_t interfererPower = 0;
-                // u_int32_t interferNum = 3;
+            if(intterf == true)
+            {
+                Ptr<SpectrumWifiPhy> interPhy;
+                double interfererPower = 1e-12;
+                u_int32_t interferNum = 3;
+                //time
+                double simStopTIme = 5.0;
+
+                NetDeviceContainer interferers2_4 = CreateInterferers("2.4GHz",interferNum, maxRadius,interfererPower,channelStr[0]);
+                NetDeviceContainer interferers5 = CreateInterferers("5GHz",interferNum, maxRadius,interfererPower,channelStr[1]);
+                NetDeviceContainer interferers6 = CreateInterferers("6GHz",interferNum, maxRadius,interfererPower,channelStr[2]);
                 
+                Ptr<UniformRandomVariable> onTimeVar = CreateObject<UniformRandomVariable>();
+                onTimeVar -> SetAttribute("Min",DoubleValue(0.02));
+                onTimeVar -> SetAttribute("Max",DoubleValue(1.0));
 
-                // NetDeviceContainer interferers2_4 = CreateInterferers("2.4GHz",interferNum, maxRadius,interfererPower,channelStr[0]);
-                // NetDeviceContainer interferers5 = CreateInterferers("5GHz",interferNum, maxRadius,interfererPower,channelStr[1]);
-                // NetDeviceContainer interferers6 = CreateInterferers("6GHz",interferNum, maxRadius,interfererPower,channelStr[2]);
-                
-                // Ptr<UniformRandomVariable> onTimeVar = CreateObject<UniformRandomVariable>();
-                // onTimeVar -> SetAttribute("Min",DoubleValue(0.02));
-                // onTimeVar -> SetAttribute("Max",DoubleValue(1.0));
+                Ptr<UniformRandomVariable> offTimeVar = CreateObject<UniformRandomVariable>();
+                offTimeVar -> SetAttribute("Min",DoubleValue(0.5));
+                offTimeVar -> SetAttribute("Max",DoubleValue(1.0));
 
-                // Ptr<UniformRandomVariable> offTimeVar = CreateObject<UniformRandomVariable>();
-                // offTimeVar -> SetAttribute("Min",DoubleValue(0.5));
-                // offTimeVar -> SetAttribute("Max",DoubleValue(1.0));
+                for(u_int32_t i = 0; i < interferNum; i++)
+                {
+                double currentTime2_4 = 0.0;
+                while(currentTime2_4 < simStopTIme)
+                {
+                    double onTime = onTimeVar-> GetValue();
+                    double offTime = offTimeVar -> GetValue();
+                     Simulator::Schedule(Seconds(onTime),
+                                        &WaveformGenerator::Start,
+                                        interferers2_4.Get(i)
+                                            ->GetObject<NonCommunicatingNetDevice>()
+                                            ->GetPhy()
+                                            ->GetObject<WaveformGenerator>());
 
-                // for(u_int32_t i = 0; i < interferNum; i++)
-                // {
-                // double currentTime2_4 = 0.0;
-                // while(currentTime2_4 < simStopTIme)
-                // {
-                //     double onTime = onTimeVar-> GetValue();
-                //     double offTime = offTimeVar -> GetValue();
-                //      Simulator::Schedule(Seconds(onTime),
-                //                         &WaveformGenerator::Start,
-                //                         interferers2_4.Get(i)
-                //                             ->GetObject<NonCommunicatingNetDevice>()
-                //                             ->GetPhy()
-                //                             ->GetObject<WaveformGenerator>());
+                    Simulator::Schedule(Seconds(currentTime2_4 + onTime),
+                                        &WaveformGenerator::Stop,
+                                        interferers2_4.Get(i)
+                                            ->GetObject<NonCommunicatingNetDevice>()
+                                            ->GetPhy()
+                                            ->GetObject<WaveformGenerator>());
+                    currentTime2_4 += (onTime + offTime);
+                }    
+                double currentTime5 = 0;
+                while(currentTime5 < simStopTIme)
+                {
+                    double onTime = onTimeVar-> GetValue();
+                    double offTime = offTimeVar -> GetValue();
+                    Simulator::Schedule(Seconds(currentTime5),&WaveformGenerator::Start,
+                                        interferers5.Get(i)
+                                            ->GetObject<NonCommunicatingNetDevice>()
+                                            ->GetPhy()
+                                            ->GetObject<WaveformGenerator>());
 
-                //     Simulator::Schedule(Seconds(currentTime2_4 + onTime),
-                //                         &WaveformGenerator::Stop,
-                //                         interferers2_4.Get(i)
-                //                             ->GetObject<NonCommunicatingNetDevice>()
-                //                             ->GetPhy()
-                //                             ->GetObject<WaveformGenerator>());
-                //     currentTime2_4 += (onTime + offTime);
-                // }    
-                // double currentTime5 = 0;
-                // while(currentTime5 < simStopTIme)
-                // {
-                //     double onTime = onTimeVar-> GetValue();
-                //     double offTime = offTimeVar -> GetValue();
-                //     Simulator::Schedule(Seconds(currentTime5),&WaveformGenerator::Start,
-                //                         interferers5.Get(i)
-                //                             ->GetObject<NonCommunicatingNetDevice>()
-                //                             ->GetPhy()
-                //                             ->GetObject<WaveformGenerator>());
-
-                //     Simulator::Schedule(Seconds(currentTime5 + onTime),&WaveformGenerator::Stop,
-                //                         interferers5.Get(i)
-                //                             ->GetObject<NonCommunicatingNetDevice>()
-                //                             ->GetPhy()
-                //                             ->GetObject<WaveformGenerator>());
-                //     currentTime5 += (onTime + offTime);
-                // }
-                // double currentTime6 = 0;
-                // while(currentTime6 < simStopTIme)
-                // {
-                //     double onTime = onTimeVar-> GetValue();
-                //     double offTime = offTimeVar -> GetValue();
-                //     Simulator::Schedule(Seconds(currentTime6),&WaveformGenerator::Start,
-                //                         interferers6.Get(i)
-                //                             ->GetObject<NonCommunicatingNetDevice>()
-                //                             ->GetPhy()
-                //                             ->GetObject<WaveformGenerator>());
-                //     Simulator::Schedule(Seconds(currentTime6 + onTime),&WaveformGenerator::Stop,
-                //                         interferers6.Get(i)
-                //                             ->GetObject<NonCommunicatingNetDevice>()
-                //                             ->GetPhy()
-                //                             ->GetObject<WaveformGenerator>());
-                //     currentTime6 += (onTime + offTime);
-                // }
-                // }
-                
+                    Simulator::Schedule(Seconds(currentTime5 + onTime),&WaveformGenerator::Stop,
+                                        interferers5.Get(i)
+                                            ->GetObject<NonCommunicatingNetDevice>()
+                                            ->GetPhy()
+                                            ->GetObject<WaveformGenerator>());
+                    currentTime5 += (onTime + offTime);
+                }
+                double currentTime6 = 0;
+                while(currentTime6 < simStopTIme)
+                {
+                    double onTime = onTimeVar-> GetValue();
+                    double offTime = offTimeVar -> GetValue();
+                    Simulator::Schedule(Seconds(currentTime6),&WaveformGenerator::Start,
+                                        interferers6.Get(i)
+                                            ->GetObject<NonCommunicatingNetDevice>()
+                                            ->GetPhy()
+                                            ->GetObject<WaveformGenerator>());
+                    Simulator::Schedule(Seconds(currentTime6 + onTime),&WaveformGenerator::Stop,
+                                        interferers6.Get(i)
+                                            ->GetObject<NonCommunicatingNetDevice>()
+                                            ->GetPhy()
+                                            ->GetObject<WaveformGenerator>());
+                    currentTime6 += (onTime + offTime);
+                }
+                }
+            } 
             /* Internet stack*/
                 InternetStackHelper stack;
                 stack.Install(wifiAPNode);
@@ -832,8 +890,8 @@ int main(int argc, char* argv[])
             //Assign address
                 Ipv4AddressHelper address;
                 address.SetBase("192.168.1.0", "255.255.255.0");
+                Ipv4InterfaceContainer apNodeInterface = address.Assign(apDevice);
                 Ipv4InterfaceContainer staNodeInterfaces = address.Assign(staDevices);
-                Ipv4InterfaceContainer apNodeInterface = address.Assign(apDevice);;
          
 
              /* Setting applications */
@@ -850,12 +908,8 @@ int main(int argc, char* argv[])
                     clientNodes.Add(wifiStaNodes.Get(i));
                 }
 
-                const auto maxLoad = nLinks *
-                                     EhtPhy::GetDataRate(mcs,
-                                                         MHz_u{static_cast<double>(width)},
-                                                         NanoSeconds(gi),
-                                                         1) /
-                                     nStations;
+                const auto maxLoad = nLinks *EhtPhy::GetDataRate(mcs,MHz_u{static_cast<double>(width)},NanoSeconds(gi), 1) / nStations;
+
                 if (udp)
                 {
                     //server & Client connect 
@@ -895,11 +949,11 @@ int main(int argc, char* argv[])
                         clientAppVO.Start(Seconds(1.0 ) + MicroSeconds(i * 100));
                         clientAppVO.Stop(simulationTime + Seconds(1));
                     //test
-                        //serverApp.Get(0)->TraceConnect("Rx", "", MakeCallback(&RxTrace));
-                        //Ptr<WifiNetDevice> dev = staDevices.Get(0)->GetObject<WifiNetDevice>();
-                        //Ptr<WifiPhy> pp = dev->GetPhy();
-                        //Ptr<YansErrorRateModel> yans =DynamicCast<YansErrorRateModel>(err);
-                        //pp->SetReceiveOkCallback(MyRxCallback);
+                        // serverApp.Get(0)->TraceConnect("Rx", "", MakeCallback(&RxTrace));
+                        // Ptr<WifiNetDevice> dev = staDevices.Get(0)->GetObject<WifiNetDevice>();
+                        // Ptr<WifiPhy> pp = dev->GetPhy();
+                        // Ptr<YansErrorRateModel> yans =DynamicCast<YansErrorRateModel>(err);
+                        // pp->SetReceiveOkCallback(MyRxCallback);
 
 
                     }
@@ -935,7 +989,8 @@ int main(int argc, char* argv[])
                         clientApp.Stop(simulationTime + Seconds(1));
                     }
                 }
-    
+        //--------------------------system info and function(my)--------------------------------------
+        
             // cumulative number of bytes received by each server application
                 std::vector<uint64_t> cumulRxBytes(nStations, 0);
 
@@ -950,11 +1005,37 @@ int main(int argc, char* argv[])
                                         tputInterval,
                                         simulationTime + Seconds(1));
                 }
-                //book
+            // flow information monitor (need to install before simulator::Run() )
                 FlowMonitorHelper flowmon;
                 Ptr<FlowMonitor> monitor = flowmon.InstallAll();
+            // STA address & link id
+            if(STAaddr_linkid == true)
+            {
+                for(u_int32_t i = 0; i < nStations ;++i)
+                {
+                    const Ptr<WifiNetDevice> mloDevice = DynamicCast<WifiNetDevice>(staDevices.Get(i));
+                    Ptr<WifiMac> mac = mloDevice->GetMac();
+                    for(uint8_t Linkid = 0; Linkid <std::max<uint8_t>(mloDevice->GetNPhys(),1);++Linkid)
+                    {
+                        auto fem = mac->GetFrameExchangeManager(Linkid);
+                        std::cout<<" staDevice " << i << " LinkId " << std::to_string(Linkid) 
+                                 << " mac address: " << fem->GetAddress() <<"\n";
+                    }
 
-                Simulator::Stop(simulationTime + Seconds(1));
+                }
+            }
+            //trace
+            //wait->connection Drop
+                 Config::Connect("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyRxDrop",MakeCallback(&MyDropCallback));
+                // Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyRxDrop",MakeCallback(&RxDropCallback));
+                // Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Mac/DcaTxop/BackoffTrace",MakeCallback(&MyBackoffTrace));
+                // Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Mac/DcaTxop/AccessGranted",MakeCallback(&MyTxStartTrace));
+                // Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyTxBegin",MakeCallback(&MyPhyTxBeginTrace));
+
+                //Config::Connect("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyTxBegin",MakeCallback(&TxTrace));
+               
+            //start--------------------------------------
+                Simulator::Stop(simulationTime + Seconds(1)); //end time (need define before simulator::Run())
                 Simulator::Run();
             //throughput calulate
             
@@ -968,25 +1049,34 @@ int main(int argc, char* argv[])
                           << (widthStr.size() > 3 ? "" : "\t") << gi << " ns\t\t\t" << throughput
                           << " Mbit/s" << std::endl;
                           
-                
-                monitor->CheckForLostPackets();
-                Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowmon.GetClassifier());
-                FlowMonitor::FlowStatsContainer stats = monitor->GetFlowStats();
 
-                for (auto i = stats.begin(); i != stats.end(); ++i)
+            //monitor get loss packets info
+                monitor->CheckForLostPackets(); 
+
+                Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowmon.GetClassifier()); 
+                FlowMonitor::FlowStatsContainer stats = monitor->GetFlowStats();//Get Flow info TX/RX packets /delaySUm /lose packet /throughput
+                if(flowinfo==true)
                 {
-                    
-                        Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(i->first);
-                        std::cout << "Flow " << i->first  << " (" << t.sourceAddress << " -> " << t.destinationAddress << ")\n";
-                        std::cout << "  Tx Packets: " << i->second.txPackets << "\n";
-                        std::cout << "  Tx Bytes:   " << i->second.txBytes << "\n";
-                        std::cout << "  TxOffered:  " << i->second.txBytes * 8.0 / 9.0 / 1000 / 1000
-                                << " Mbps\n\n";
-                        std::cout << "  Rx Packets: " << i->second.rxPackets << "\n";
-                        std::cout << "  Rx Bytes:   " << i->second.rxBytes << "\n";
-                        std::cout << "  Throughput: " << i->second.rxBytes * 8.0 / 9.0 / 1000 / 1000
-                                << " Mbps\n";
-                }   
+                    for (auto i = stats.begin(); i != stats.end(); ++i)
+                    {
+                        //i->first : FlowId , i -> second || i->second : packet information
+                            Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(i->first); //Five Tuple (address information)
+                            std::cout << "Flow " << i->first  << " (" << t.sourceAddress << " -> " << t.destinationAddress << ")\n";
+                            std::cout << "  Tx Packets: " << i->second.txPackets << "\n";
+                            std::cout << "  Tx Bytes:   " << i->second.txBytes << "\n";
+                            std::cout << "  TxOffered:  " << i->second.txBytes * 8.0 / 9.0 / 1000 / 1000  //throughput caculate
+                                    << " Mbps\n";
+                            // std::cout << "  Avg Delay:  " << i->second.delaySum / i->second.rxPackets << "\n";
+                            // std::cout << "  Packet loss " << i->second.lostPackets << " / " << i->second.txPackets << " = "
+                            //         << (double)i->second.lostPackets/(double)i->second.txPackets *100 <<"\n";
+                            std::cout << "----------------------------------------------------------------"<<"\n";
+                            std::cout << "  Rx Packets: " << i->second.rxPackets << "\n";
+                            std::cout << "  Rx Bytes:   " << i->second.rxBytes << "\n";
+                            std::cout << "  Throughput: " << i->second.rxBytes * 8.0 / 9.0 / 1000 / 1000
+                                    << " Mbps\n";
+                    }  
+                } 
+    
             }
         }
     }
