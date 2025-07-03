@@ -45,6 +45,7 @@
 #include "ns3/waveform-generator.h"
 #include "ns3/non-communicating-net-device.h"
 #include "ns3/wifi-phy-common.h"
+#include "ns3/wifi-mode.h"
 
 #include <algorithm>
 #include <array>
@@ -59,7 +60,66 @@ using namespace ns3;
 NS_LOG_COMPONENT_DEFINE("eht-wifi-network");
 
 int64_t streamNumber = 100;
-int64_t g_rxCounter = 0;
+
+//struct
+struct TxRecord{
+    Ptr<Node> txNode;
+    uint32_t nodeId;
+    uint16_t channel;
+    Time startTime;
+    Time endTime;
+    Mac48Address srcMac;
+    
+};
+//global map (wait)
+ std::map<uint16_t,std::vector<TxRecord>> g_activeTx;
+
+// static void cleanupTxRecord(uint16_t channel, Time now)
+// {
+//     if(g_activeTx.find(channel) == g_activeTx.end()) return;
+//     auto &vec = g_activeTx[channel];
+
+//     vec.erase(std::remove_if(vec.begin(),vec.end(),
+//                             [now](const TxRecord& rec){ return rec.endTime < now;}),
+//                             vec.end());
+// }
+
+//get Tx record
+static void PhyTxBeginTrace(Ptr<const Packet> packet,WifiTxVector txVector, Ptr<WifiNetDevice> dev)
+{
+    Ptr<Node> node = dev->GetNode();
+    uint32_t nodeId = node->GetId();
+    Ptr<WifiPhy> phy = dev->GetPhy();
+    //channel
+    uint16_t channelNum = phy->GetChannelNumber();
+    // duration calculate
+    uint32_t pktSize = packet-> GetSize();
+    WifiMode Mode = txVector.GetMode();
+    DataRate dr = Mode.GetDataRate(txVector);
+    double rateMbps = dr.GetBitRate() /1e6;  //Mbit/s
+
+    double useTime = pktSize * 8 /rateMbps ;
+    Time  duration = Seconds(useTime);
+
+  // 記錄傳輸事件
+    TxRecord rec;
+    rec.txNode    = node;
+    rec.nodeId    = nodeId;
+    rec.channel   = channelNum;
+    rec.startTime = Simulator::Now();
+    rec.endTime   = Simulator::Now() + duration;
+// 記錄來源MAC地址
+    rec.srcMac    = Mac48Address::ConvertFrom(dev->GetAddress());
+    g_activeTx[channelNum].push_back(rec);
+    std::cout << " txNode : " << rec.txNode 
+              << "\n noidId : " << rec.nodeId 
+              << "\n channelNum : " << rec.channel
+              << "\n Start : " << rec.startTime
+              << "\n End : " << rec.endTime
+              << " srcMac : " << rec.srcMac <<"\n";
+}
+
+
 //func
 MobilityHelper InstallApMove(NodeContainer wifiApNode)
 {
@@ -348,8 +408,8 @@ void
 MyDropCallback(std::string context,Ptr<const Packet> p, WifiPhyRxfailureReason reason)
 {
     std::cout << "\n[PHY DROP time]: "
-              << Simulator::Now().GetSeconds()<<"s";
-    //std::cout <<"\n[RxDrop] Context = " << context << "\n Packet UID = " << p->GetUid() << ", Reason = " << reason<<std::endl;
+              << Simulator::Now().GetSeconds()<<"s\n";
+    std::cout <<"\n[RxDrop] Context = " << context << "\n Packet UID = " << p->GetUid() << ", Reason = " << reason<<std::endl;
     std::size_t devIndex = context.find("DeviceList/");
     uint32_t nodeId = 999;
     uint32_t devId = 999;
@@ -362,7 +422,6 @@ MyDropCallback(std::string context,Ptr<const Packet> p, WifiPhyRxfailureReason r
     WifiMacHeader hdr;
     Mac48Address src;
     Mac48Address dst;
-
     Ptr<Packet> pktCopy = p->Copy();
     if(pktCopy->PeekHeader(hdr))
     {
@@ -374,35 +433,13 @@ MyDropCallback(std::string context,Ptr<const Packet> p, WifiPhyRxfailureReason r
     else
     {
         std::cout << " MACHeader error!\n";
-    }
-
-    // LinkId
-    Ptr<Node>  node = NodeList::GetNode(nodeId);
-    Ptr<NetDevice> netDev = node->GetDevice(devId);
-    Ptr<WifiNetDevice> wifiDev = DynamicCast<WifiNetDevice>(netDev);
-    Ptr<WifiMac> mac = wifiDev->GetMac();
-
-    uint8_t trueLinkId;
-    Mac48Address trueMacAddr;
-    for(uint8_t Linkid = 0; Linkid <std::max<uint8_t>(wifiDev->GetNPhys(),1);++Linkid)
-    {
-        auto fem = mac->GetFrameExchangeManager(Linkid);
-        std::cout<<" Device :" << nodeId << " LinkId :" << std::to_string(Linkid) 
-                 << " mac address : " << fem->GetAddress() <<"\n";
-        if(src == fem->GetAddress())
-        {
-            trueLinkId = Linkid;
-            trueMacAddr = fem->GetAddress();
-        }
-    }
-    std::cout << " trueLinkId : " << trueLinkId << " trueMacAddr : " <<trueMacAddr <<std::endl;
+    }    
 }
+
 //wifi backoff->access-> Tx
-void
-MyBackoffTrace(uint32_t slots)
-{
-    std::cout <<"Backoff Started with" << slots << " slots at "<<Simulator::Now().GetSeconds()<<"s\n";
-}
+
+
+
 
 void
 MyTxStartTrace()
@@ -411,9 +448,10 @@ MyTxStartTrace()
 }
 
 void
-MyPhyTxBeginTrace(Ptr<const Packet>  p )
+MyPhyTxBeginTrace(Ptr<const Packet>  p ,Watt_u txDbm)
 {
-    std::cout <<"[Tx] packet starts transmitting at " <<  Simulator::Now().GetSeconds();
+    
+    std::cout <<"[Tx] packet starts transmitting at " <<  Simulator::Now().GetSeconds() << "\n\n";
 }
 
 
@@ -523,7 +561,7 @@ int main(int argc, char* argv[])
                           // second link exists)
     double frequency3{6}; // whether the third link operates in the 2.4, 5 or 6 GHz (0 means no third link exists)
     
-    std::size_t nStations{2};
+    std::size_t nStations{3};
     std::string dlAckSeqType{"NO-OFDMA"};
     bool enableUlOfdma{false};
     bool enableBsrp{false};
@@ -724,8 +762,9 @@ int main(int argc, char* argv[])
                     auto lossModel = CreateObject<RangePropagationLossModel>();
                     lossModel->SetAttribute("MaxRange",DoubleValue((maxRadius)*1.2));
                     // give channel my lossModel
+                    // auto delayModel = CreateObject<ConstantSpeedPropagationDelayModel>();
+                    // spectrumChannel->SetPropagationDelayModel(delayModel);
                     spectrumChannel->AddPropagationLossModel(lossModel);
-
                     phy.AddChannel(spectrumChannel, freqRanges[linkId]);
                 }
 
@@ -1025,12 +1064,27 @@ int main(int argc, char* argv[])
                 }
             }
             //trace
+            for(uint32_t i = 0; i < nStations; ++i)
+            {
+               const Ptr<WifiNetDevice> mloDevice = DynamicCast<WifiNetDevice>(staDevices.Get(i));
+               Ptr<WifiPhy> phy = mloDevice->GetPhy();
+               Ptr<WifiRemoteStationManager> StaM = mloDevice->GetRemoteStationManager();
+
+               WifiMode mode = WifiModeFactory::GetFactory() -> Get(StringValue(dataModeStr));
+            //    Ptr<WifiTxVector> txVector = StaM->GetDataTxVector();
+
+               phy->TraceConnectWithoutContext("PhyTxBegin",MakeCallback(&PhyTxBeginTrace));
+            //    mloDevice -> TraceConnectWithoutContext("PhyRxDrop",MakeCallback(&MyDropCallback));
+            }
+
+            const Ptr<WifiNetDevice> ap = DynamicCast<WifiNetDevice>(apDevice.Get(0));
+            ap-> TraceConnectWithoutContext("PhyRxDrop",MakeCallback(&MyDropCallback));
+
             //wait->connection Drop
-                 Config::Connect("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyRxDrop",MakeCallback(&MyDropCallback));
+                // Config::Connect("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyRxDrop",MakeCallback(&MyDropCallback));
                 // Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyRxDrop",MakeCallback(&RxDropCallback));
-                // Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Mac/DcaTxop/BackoffTrace",MakeCallback(&MyBackoffTrace));
                 // Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Mac/DcaTxop/AccessGranted",MakeCallback(&MyTxStartTrace));
-                // Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyTxBegin",MakeCallback(&MyPhyTxBeginTrace));
+                // Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Mac/DcaTxop/BackoffTrace",MakeCallback(&MyBackoffTrace));
 
                 //Config::Connect("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyTxBegin",MakeCallback(&TxTrace));
                
