@@ -85,6 +85,26 @@ struct TxRecord{
 // }
 
 //get Tx record
+WifiPhyBand GetBandFromFreq(uint16_t freq)
+{
+        if (freq >= 2400 && freq < 2500)
+        {
+            return WifiPhyBand::WIFI_PHY_BAND_2_4GHZ;
+        }
+        else if (freq >= 5000 && freq < 6000)
+        {
+            return WifiPhyBand::WIFI_PHY_BAND_5GHZ;
+        }
+        else if (freq >= 5925 && freq <= 7125)
+        {
+            return  WifiPhyBand::WIFI_PHY_BAND_6GHZ;
+        }
+        else
+        {
+            NS_FATAL_ERROR("Unknown frequency: " << freq);
+        }
+}
+
 static void PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Packet> packet, Watt_u txDbm)
 {
     
@@ -102,11 +122,8 @@ static void PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Pa
     uint32_t pktSize = packet-> GetSize();
     WifiMode Mode = txVector.GetMode();
     DataRate dr = Mode.GetDataRate(txVector);
-    double rateMbps = dr.GetBitRate() /1e6;  //Mbit/s
-    double useTime = pktSize * 8 /rateMbps ;
-    
-    Time  duration = Seconds(useTime);
-    // duration calculate
+ 
+    Time duration = phy->CalculateTxDuration(pktSize,txVector,GetBandFromFreq(phy->GetFrequency()));
     
     // 記錄傳輸事件
     TxRecord rec;
@@ -119,24 +136,19 @@ static void PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Pa
     rec.srcMac    = Mac48Address::ConvertFrom(dev->GetAddress());
     g_activeTx[channelNum].push_back(rec);
     
-    // std::cout << "Type : " << hdr.GetTypeString() 
-    //           << " pktSize : " << pktSize <<" Byte " 
-    //           << " DataRate : " << dr 
-    //           << "\n channelNum : " << channelNum
-    //           << " linkId : " << linkId
-    //           << " Freq : " << phy->GetFrequency()
-    //           << "\n srcMac : " << rec.srcMac
-    //           << " dstMac : " << hdr.GetAddr2()
-    //           << std::endl;
-
-    //--------------------------------------------
-    // std::cout << " txNode : " << rec.txNode 
-    //           << "\n noidId : " << rec.nodeId 
-    //           << "\n channelNum : " << rec.channel
-    //           << "\n Start : " << rec.startTime.GetSeconds()
-    //           << "\n Duration : " << duration.GetSeconds()
-    //           << "\n End : " << rec.endTime.GetSeconds()
-    //           << "\n srcMac : " << rec.srcMac <<"\n";
+    std::cout << "Type : " << hdr.GetTypeString() 
+              << "  pktSize : " << pktSize <<" Byte " 
+              << "  DataRate : " << dr 
+              << " \nStartTime : " << rec.startTime.GetSeconds()<< "s"
+              << "  Duration : " << duration.GetMicroSeconds() << "us"
+              << "  EndTime : " << rec.endTime.GetSeconds() << "s"
+              << "\nchannelNum : " << channelNum
+              << "  linkId : " << linkId
+              << "  Freq : " << phy->GetFrequency()
+              << "\nsrcMac : " << rec.srcMac
+              << "  dstMac : " << hdr.GetAddr2()
+              <<"\n-------------------------------------------------------------"
+              << std::endl;
 }
 
 
@@ -381,7 +393,7 @@ NetDeviceContainer CreateInterferers(std::string bandName, uint32_t numInterfere
     return waveformGeneratorDevices;
 }
 
-ApplicationContainer CreateClientFlow(UintegerValue ACLevel, UintegerValue payloadSize, uint64_t DataRate, InetSocketAddress dest, NodeContainer STA,
+ApplicationContainer CreateClientFlow(UintegerValue ACLevel, UintegerValue payloadSize, uint64_t DataRate, InetSocketAddress dest, Ptr<Node> STA,
                                       DoubleValue ontimeStart, DoubleValue onTimeEnd, DoubleValue offTimeStart, DoubleValue offTimeEnd)
 {
   //{0x70, 0x28, 0xb8, 0xc0}; // AC_BE, AC_BK, AC_VI, AC_VO
@@ -390,7 +402,7 @@ ApplicationContainer CreateClientFlow(UintegerValue ACLevel, UintegerValue paylo
   
   onoff.SetAttribute("DataRate", DataRateValue(DataRate * 1e6));
   onoff.SetAttribute("Tos",UintegerValue(ACLevel));
-
+  
   Ptr<UniformRandomVariable> onTime = CreateObject<UniformRandomVariable>();
   onTime -> SetAttribute("Min",DoubleValue(ontimeStart));
   onTime -> SetAttribute("Max",DoubleValue(onTimeEnd));
@@ -401,9 +413,11 @@ ApplicationContainer CreateClientFlow(UintegerValue ACLevel, UintegerValue paylo
   offTime -> SetAttribute("Max",DoubleValue(offTimeEnd));
 
   onoff.SetAttribute("OffTime", PointerValue(offTime));
-  
+
+  onoff.SetAttribute("Remote",AddressValue(dest));
   ApplicationContainer clientApp = onoff.Install(STA);
   streamNumber += onoff.AssignStreams(STA,streamNumber);
+  std::cout << "Install App on STA: " << STA->GetDevice(0)->GetAddress() << std::endl;
   return clientApp;
 }
 
@@ -425,6 +439,7 @@ RxDropCallback(Ptr<const Packet> p, WifiPhyRxfailureReason reason)
     
 }
 void
+
 MyDropCallback(std::string context,Ptr<const Packet> p, WifiPhyRxfailureReason reason)
 {
     std::cout << "\n[PHY DROP time]: "
@@ -456,23 +471,7 @@ MyDropCallback(std::string context,Ptr<const Packet> p, WifiPhyRxfailureReason r
     }    
 }
 
-//wifi backoff->access-> Tx
 
-
-
-
-void
-MyTxStartTrace()
-{
-    std::cout <<"[ Access channel] at : " << Simulator::Now().GetSeconds() <<"s\n";
-}
-
-void
-MyPhyTxBeginTrace(Ptr<const Packet>  p ,Watt_u txDbm)
-{
-    
-    std::cout <<"[Tx] packet starts transmitting at " <<  Simulator::Now().GetSeconds() << "\n\n";
-}
 
 
 
@@ -1000,11 +999,11 @@ int main(int argc, char* argv[])
                         // clientAppBE.Stop(simulationTime + Seconds(1));
                         // //VI
                         ApplicationContainer clientAppVI = CreateClientFlow(0xb8, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
-                                                                            0.2,1,0.1,2);
+                                                                            0.2,1,0.1,2); 
                         clientAppVI.Start(Seconds(1.0) + MicroSeconds(i * 100));
                         clientAppVI.Stop(simulationTime + Seconds(1));
                         // //VO
-                        ApplicationContainer clientAppVO = CreateClientFlow(0xc0, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
+                        ApplicationContainer clientAppVO = CreateClientFlow(0xc0, payloadSize-100,nonHtRefRateMbps,dest,clientNodes.Get(i),
                                                                             0.5,1,1,2);
                         clientAppVO.Start(Seconds(1.0 ) + MicroSeconds(i * 100));
                         clientAppVO.Stop(simulationTime + Seconds(1));
@@ -1100,10 +1099,8 @@ int main(int argc, char* argv[])
 
 
             //wait->connection Drop
-                // Config::Connect("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyRxDrop",MakeCallback(&MyDropCallback));
-                Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyRxDrop",MakeCallback(&RxDropCallback));
-                // Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Mac/DcaTxop/AccessGranted",MakeCallback(&MyTxStartTrace));
-                // Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Mac/DcaTxop/BackoffTrace",MakeCallback(&MyBackoffTrace));
+                // Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyRxDrop",MakeCallback(&RxDropCallback));
+                
 
                 //Config::Connect("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyTxBegin",MakeCallback(&TxTrace));
                
