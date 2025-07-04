@@ -66,13 +66,14 @@ struct TxRecord{
     Ptr<Node> txNode;
     uint32_t nodeId;
     uint16_t channel;
+    uint32_t linkId;
     Time startTime;
     Time endTime;
     Mac48Address srcMac;
     
 };
-//global map (wait)
- std::map<uint16_t,std::vector<TxRecord>> g_activeTx;
+//global map
+std::map<std::pair<uint32_t, Mac48Address>,std::vector<TxRecord>> g_activeTx;
 
 // static void cleanupTxRecord(uint16_t channel, Time now)
 // {
@@ -130,11 +131,14 @@ static void PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Pa
     rec.txNode    = node;
     rec.nodeId    = nodeId;
     rec.channel   = channelNum;
+    rec.linkId    = linkId;
     rec.startTime = Simulator::Now();
     rec.endTime   = Simulator::Now() + duration;
-    // 記錄來源MAC地址
     rec.srcMac    = Mac48Address::ConvertFrom(dev->GetAddress());
-    g_activeTx[channelNum].push_back(rec);
+
+    Mac48Address srcPHY = hdr.GetAddr2();
+    std::pair<uint32_t, Mac48Address> key = std::make_pair(linkId,srcPHY); //LinkId +PHYaddr -> Macaddr
+    g_activeTx[key].push_back(rec);
     
     std::cout << "Type : " << hdr.GetTypeString() 
               << "  pktSize : " << pktSize <<" Byte " 
@@ -146,11 +150,30 @@ static void PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Pa
               << "  linkId : " << linkId
               << "  Freq : " << phy->GetFrequency()
               << "\nsrcMac : " << rec.srcMac
-              << "  dstMac : " << hdr.GetAddr2()
+              << "  SrcPHY : " << srcPHY
+              << "  dstMac : " << hdr.GetAddr1()
               <<"\n-------------------------------------------------------------"
               << std::endl;
 }
 
+void
+// + linkId,
+MyDropCallback(uint32_t linkId, Ptr<WifiNetDevice> dev, Ptr<const Packet> p, WifiPhyRxfailureReason reason)
+{
+    Time now = Simulator::Now();
+
+    WifiMacHeader hdr;
+    p->PeekHeader(hdr);
+    Mac48Address srcMac = hdr.GetAddr2();
+    std::pair<uint32_t,Mac48Address> key = std::make_pair(linkId, srcMac);
+
+    if(g_activeTx.find(key)!=g_activeTx.end())
+    {
+
+    }
+
+
+}
 
 //func
 MobilityHelper InstallApMove(NodeContainer wifiApNode)
@@ -438,38 +461,7 @@ RxDropCallback(Ptr<const Packet> p, WifiPhyRxfailureReason reason)
     std::cout <<"\n[RxDrop] Packet UID = "<< p->GetUid() <<", Reason = " << reason <<"\n"<< std::endl;
     
 }
-void
 
-MyDropCallback(std::string context,Ptr<const Packet> p, WifiPhyRxfailureReason reason)
-{
-    std::cout << "\n[PHY DROP time]: "
-              << Simulator::Now().GetSeconds()<<"s\n";
-    std::cout <<"\n[RxDrop] Context = " << context << "\n Packet UID = " << p->GetUid() << ", Reason = " << reason<<std::endl;
-    std::size_t devIndex = context.find("DeviceList/");
-    uint32_t nodeId = 999;
-    uint32_t devId = 999;
-
-    if(devIndex != std::string::npos)
-    {
-        sscanf(context.c_str(),"/NodeList/%u/DeviceList/%u",&nodeId,&devId);
-        std::cout<<" nodeId : " << nodeId << "\tdevId : " << devId <<std::endl;
-    }
-    WifiMacHeader hdr;
-    Mac48Address src;
-    Mac48Address dst;
-    Ptr<Packet> pktCopy = p->Copy();
-    if(pktCopy->PeekHeader(hdr))
-    {
-        src = hdr.GetAddr2();
-        dst = hdr.GetAddr1();
-        std::cout << " src : " << src <<"\n";
-        std::cout << " dst : " << dst <<"\n";
-    }
-    else
-    {
-        std::cout << " MACHeader error!\n";
-    }    
-}
 
 
 
@@ -1093,10 +1085,14 @@ int main(int argc, char* argv[])
                    phy->TraceConnectWithoutContext("PhyTxBegin",MakeBoundCallback(&PhyTxBeginTrace,mloDevice,j));
 
                }   
-                           
-                // mloDevice -> TraceConnectWithoutContext("PhyRxDrop",MakeCallback(&MyDropCallback));
             }
-
+            
+            for(uint32_t i = 0; i < nLinks; ++i)
+            {
+                const Ptr<WifiNetDevice> mloDevice = DynamicCast<WifiNetDevice>(apDevice.Get(0));
+                Ptr<WifiPhy> phy = mloDevice->GetPhy(i);
+                phy->TraceConnectWithoutContext("PhyRxDrop", MakeBoundCallback(&MyDropCallback,i,mloDevice));
+            }
 
             //wait->connection Drop
                 // Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyRxDrop",MakeCallback(&RxDropCallback));
