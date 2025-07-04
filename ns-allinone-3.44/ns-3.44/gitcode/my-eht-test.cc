@@ -72,8 +72,14 @@ struct TxRecord{
     Mac48Address srcMac;
     
 };
+struct DropTable{
+    Mac48Address addr;
+    Time startTime;
+    Time endTime;
+};
 //global map
-std::map<std::pair<uint32_t, Mac48Address>,std::vector<TxRecord>> g_activeTx;
+std::map<std::pair<uint32_t, Mac48Address>,TxRecord> g_activeTx;
+std::vector<DropTable> StaDrop;
 
 // static void cleanupTxRecord(uint16_t channel, Time now)
 // {
@@ -138,22 +144,23 @@ static void PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Pa
 
     Mac48Address srcPHY = hdr.GetAddr2();
     std::pair<uint32_t, Mac48Address> key = std::make_pair(linkId,srcPHY); //LinkId +PHYaddr -> Macaddr
-    g_activeTx[key].push_back(rec);
+    g_activeTx[key] = rec;
     
-    std::cout << "Type : " << hdr.GetTypeString() 
-              << "  pktSize : " << pktSize <<" Byte " 
-              << "  DataRate : " << dr 
-              << " \nStartTime : " << rec.startTime.GetSeconds()<< "s"
-              << "  Duration : " << duration.GetMicroSeconds() << "us"
-              << "  EndTime : " << rec.endTime.GetSeconds() << "s"
-              << "\nchannelNum : " << channelNum
-              << "  linkId : " << linkId
-              << "  Freq : " << phy->GetFrequency()
-              << "\nsrcMac : " << rec.srcMac
-              << "  SrcPHY : " << srcPHY
-              << "  dstMac : " << hdr.GetAddr1()
-              <<"\n-------------------------------------------------------------"
-              << std::endl;
+     
+    // std::cout << "Type : " << hdr.GetTypeString() 
+    //           << "  pktSize : " << pktSize <<" Byte " 
+    //           << "  DataRate : " << dr 
+    //           << " \nStartTime : " << rec.startTime.GetSeconds()<< "s"
+    //           << "  Duration : " << duration.GetMicroSeconds() << "us"
+    //           << "  EndTime : " << rec.endTime.GetSeconds() << "s"
+    //           << "\nchannelNum : " << channelNum
+    //           << "  linkId : " << linkId
+    //           << "  Freq : " << phy->GetFrequency()
+    //           << "\nsrcMac : " << rec.srcMac
+    //           << "  SrcPHY : " << srcPHY
+    //           << "  dstMac : " << hdr.GetAddr1()
+    //           <<"\n-------------------------------------------------------------"
+    //           << std::endl;
 }
 
 void
@@ -164,15 +171,19 @@ MyDropCallback(uint32_t linkId, Ptr<WifiNetDevice> dev, Ptr<const Packet> p, Wif
 
     WifiMacHeader hdr;
     p->PeekHeader(hdr);
-    Mac48Address srcMac = hdr.GetAddr2();
-    std::pair<uint32_t,Mac48Address> key = std::make_pair(linkId, srcMac);
-
-    if(g_activeTx.find(key)!=g_activeTx.end())
+    Mac48Address srcMac = hdr.GetAddr2(); //物理層address!!!! 非mac address!!!!
+    std::pair<uint32_t, Mac48Address> key = std::make_pair(linkId, srcMac);
+    
+    auto it = g_activeTx.find(key);
+    
+    if( it != g_activeTx.end())
     {
-
+        const TxRecord& cur = it->second;
+        std::cout << "srcMac :  "<< cur.srcMac << "    startTime : " << cur.startTime.GetSeconds() << "     endTime : " <<cur.endTime.GetSeconds() 
+        << "   link : " << linkId << "  reason :  "  << reason  << "\n";
+        StaDrop.push_back({srcMac, cur.startTime, cur.endTime });
     }
-
-
+    
 }
 
 //func
@@ -440,7 +451,7 @@ ApplicationContainer CreateClientFlow(UintegerValue ACLevel, UintegerValue paylo
   onoff.SetAttribute("Remote",AddressValue(dest));
   ApplicationContainer clientApp = onoff.Install(STA);
   streamNumber += onoff.AssignStreams(STA,streamNumber);
-  std::cout << "Install App on STA: " << STA->GetDevice(0)->GetAddress() << std::endl;
+  //std::cout << "Install App on STA: " << STA->GetDevice(0)->GetAddress() << std::endl;
   return clientApp;
 }
 
@@ -1059,7 +1070,9 @@ int main(int argc, char* argv[])
             // flow information monitor (need to install before simulator::Run() )
                 FlowMonitorHelper flowmon;
                 Ptr<FlowMonitor> monitor = flowmon.InstallAll();
-            // STA address & link id
+                
+
+            // STA掛勾三條link是否成功
             if(STAaddr_linkid == true)
             {
                 for(u_int32_t i = 0; i < nStations ;++i)
@@ -1076,6 +1089,8 @@ int main(int argc, char* argv[])
                 }
             }
             //trace
+
+            //物理層傳送的封包資訊
             for(uint32_t i = 0; i < nStations; ++i)
             {
                const Ptr<WifiNetDevice> mloDevice = DynamicCast<WifiNetDevice>(staDevices.Get(i));
@@ -1086,7 +1101,8 @@ int main(int argc, char* argv[])
 
                }   
             }
-            
+
+            //物理層錯誤查詢
             for(uint32_t i = 0; i < nLinks; ++i)
             {
                 const Ptr<WifiNetDevice> mloDevice = DynamicCast<WifiNetDevice>(apDevice.Get(0));
@@ -1094,15 +1110,11 @@ int main(int argc, char* argv[])
                 phy->TraceConnectWithoutContext("PhyRxDrop", MakeBoundCallback(&MyDropCallback,i,mloDevice));
             }
 
-            //wait->connection Drop
-                // Config::ConnectWithoutContext("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyRxDrop",MakeCallback(&RxDropCallback));
-                
-
-                //Config::Connect("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/PhyTxBegin",MakeCallback(&TxTrace));
                
             //start--------------------------------------
                 Simulator::Stop(simulationTime + Seconds(1)); //end time (need define before simulator::Run())
                 Simulator::Run();
+
             //throughput calulate
             
                 cumulRxBytes = GetRxBytes(udp, serverApp, payloadSize);
@@ -1110,7 +1122,6 @@ int main(int argc, char* argv[])
                 auto throughput = (rxBytes * 8) / simulationTime.GetMicroSeconds(); // Mbit/s
 
                 Simulator::Destroy();
-            
                 std::cout << +mcs << "\t\t\t" << widthStr << " MHz\t\t"
                           << (widthStr.size() > 3 ? "" : "\t") << gi << " ns\t\t\t" << throughput
                           << " Mbit/s" << std::endl;
