@@ -69,18 +69,32 @@ struct TxRecord{
     uint32_t linkId;
     Time startTime;
     Time endTime;
-    Mac48Address srcMac;
-    
+    Mac48Address srcMac; 
+    std::string Type ;
+    double BER;
+    double Signal;
+    double Noise;
 };
 struct DropTable{
     Mac48Address addr;
     Time startTime;
     Time endTime;
 };
+struct LinkTable
+{
+    uint32_t c_count = 0;
+    uint32_t n_count = 0;
+    uint32_t h_count = 0;
+};
 //global map
 std::map<std::pair<uint32_t, Mac48Address>,TxRecord> g_activeTx;
 std::vector<DropTable> StaDrop;
+std::vector<LinkTable> apLinkTable(3);
+std::vector<Time> lastStart(3);
+std::vector<Time> lastEnd(3);
+std::vector<Mac48Address> lastMacAddr(3);
 
+uint32_t count = 0;
 // static void cleanupTxRecord(uint16_t channel, Time now)
 // {
 //     if(g_activeTx.find(channel) == g_activeTx.end()) return;
@@ -128,8 +142,6 @@ static void PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Pa
     WifiTxVector txVector = StaManger->GetDataTxVector(hdr,allowedWidth);
     uint32_t pktSize = packet-> GetSize();
     WifiMode Mode = txVector.GetMode();
-    DataRate dr = Mode.GetDataRate(txVector);
- 
     Time duration = phy->CalculateTxDuration(pktSize,txVector,GetBandFromFreq(phy->GetFrequency()));
     
     // 記錄傳輸事件
@@ -141,15 +153,15 @@ static void PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Pa
     rec.startTime = Simulator::Now();
     rec.endTime   = Simulator::Now() + duration;
     rec.srcMac    = Mac48Address::ConvertFrom(dev->GetAddress());
-
     Mac48Address srcPHY = hdr.GetAddr2();
+    rec.Type      = hdr.GetTypeString() ; 
     std::pair<uint32_t, Mac48Address> key = std::make_pair(linkId,srcPHY); //LinkId +PHYaddr -> Macaddr
+
     g_activeTx[key] = rec;
     
      
     // std::cout << "Type : " << hdr.GetTypeString() 
     //           << "  pktSize : " << pktSize <<" Byte " 
-    //           << "  DataRate : " << dr 
     //           << " \nStartTime : " << rec.startTime.GetSeconds()<< "s"
     //           << "  Duration : " << duration.GetMicroSeconds() << "us"
     //           << "  EndTime : " << rec.endTime.GetSeconds() << "s"
@@ -174,14 +186,101 @@ MyDropCallback(uint32_t linkId, Ptr<WifiNetDevice> dev, Ptr<const Packet> p, Wif
     Mac48Address srcMac = hdr.GetAddr2(); //物理層address!!!! 非mac address!!!!
     std::pair<uint32_t, Mac48Address> key = std::make_pair(linkId, srcMac);
     
+
+
     auto it = g_activeTx.find(key);
     
     if( it != g_activeTx.end())
     {
         const TxRecord& cur = it->second;
-        std::cout << "srcMac :  "<< cur.srcMac << "    startTime : " << cur.startTime.GetSeconds() << "     endTime : " <<cur.endTime.GetSeconds() 
-        << "   link : " << linkId << "  reason :  "  << reason  << "\n";
         StaDrop.push_back({srcMac, cur.startTime, cur.endTime });
+        if(std::abs((lastStart[linkId] - cur.startTime).GetMicroSeconds()) < 1)
+        {
+            if(count == 0 && (lastMacAddr[linkId]!= cur.srcMac))
+            {
+                apLinkTable[linkId].c_count += 1;
+                // std::cout << " link :" << linkId << " collision ! " << " LastStart : " << lastStart[linkId].GetSeconds()
+                //           << " StartTime : "<< cur.startTime.GetSeconds()  << "\n";
+                count++;
+            }
+            else
+            {
+                count++;
+            }
+
+        }
+        else
+        {
+            count = 0 ;
+            if(lastEnd[linkId] > cur.startTime && std::abs((lastStart[linkId] - cur.startTime).GetMicroSeconds()) > 5)
+            {
+                if(lastMacAddr[linkId]!= cur.srcMac)
+                {
+                    apLinkTable[linkId].h_count += 1;
+                    // std::cout  << " link :" << linkId << " hidden_node ! "
+                    //            << " lastEnd : " << lastEnd[linkId].GetSeconds()
+                    //            << " StartTime : "<< cur.startTime.GetSeconds()
+                    //            << " hidenTime :" << apLinkTable[linkId].h_count << "\n";
+                }
+            }
+            else if(lastMacAddr[linkId]!= cur.srcMac)
+            {
+
+            }
+        }
+        
+        // std::cout << "srcMac :  "<< cur.srcMac 
+        //           <<"\nnow : " << now.GetSeconds() <<"    startTime : " << cur.startTime.GetSeconds() << "    endTime : " <<cur.endTime.GetSeconds() 
+        //           << "\nlink : " << linkId << " Type : "<< cur.Type << "  reason :  "  << reason  
+        //           << " Beacon : "<< now.GetSeconds() / double(0.1) << "\n"
+        //           << "---------------------------------------------------------------------------------------------------\n";
+        lastStart[linkId]   = cur.startTime;
+        lastEnd[linkId]     = cur.endTime;
+        lastMacAddr[linkId] = cur.srcMac;
+    }
+                
+}
+
+void 
+SnifferRxCallback(uint32_t linkId, uint32_t mcs, Ptr<const Packet> p, uint16_t channelFreqMhz, WifiTxVector txVector, MpduInfo aMpdu, SignalNoiseDbm signalNoise,uint16_t stdId)
+{
+    
+    WifiMacHeader hdr;
+    p->PeekHeader(hdr);
+    Mac48Address srcMac = hdr.GetAddr2(); //物理層address!!!! 非mac address!!!!
+    std::pair<uint32_t, Mac48Address> key = std::make_pair(linkId, srcMac);
+    
+    WifiMode mode = txVector.GetMode();
+    DataRate dr = EhtPhy::GetDataRate(mcs,MHz_u{static_cast<double>(20)},NanoSeconds(800), 1);
+    
+    //BER Rate
+    
+    double signal = signalNoise.signal; // dBm
+    double noise  = signalNoise.noise;  // dBm
+    double snr_dB = signal - noise;
+    double snr_linear = std::pow(10.0, snr_dB / 10.0);
+    double EbNo = snr_linear * 20 * 1e6 / dr.GetBitRate();
+    double z = std::sqrt((1.5 * log2(16) * EbNo) / (16 - 1.0));
+    double z1 = ((1.0 - 1.0 / std::sqrt(16)) * erfc(z));
+    double z2 = 1 - std::pow((1 - z1), 2);
+    double BER = z2 / log2(16);
+    double SUC = std::pow(700, (1.0 - BER));
+    std::cout << "S : " << signal 
+              << " N : " << noise 
+              << " SNR_dB : " << snr_dB 
+              << " SNR_L : " << snr_linear
+              << " BER : " << BER 
+              << " SUC : " << SUC
+              << " DateRate : " << dr << "\n";
+
+
+    auto it = g_activeTx.find(key);
+    if(it != g_activeTx.end())
+    {
+        TxRecord& cur = it->second;
+        cur.Noise = noise;
+        cur.Signal =signal;
+        cur.BER = BER ;
     }
     
 }
@@ -348,7 +447,7 @@ NodeContainer CreateMultipleInterferers(std::string bandName, uint32_t numInterf
 NetDeviceContainer CreateInterferers(std::string bandName, uint32_t numInterferers, double radius, 
                                 Watt_u waveformPower,std::string freqSet)
 {
-    uint16_t freqRange;
+    uint16_t freqRange = 5180;
     BandInfo bandInfo;
     Bands bands;
     Ptr<SpectrumModel>SpectrumBand ;
@@ -569,7 +668,7 @@ int main(int argc, char* argv[])
     std::string emlsrLinks{"0,1,2"}; //3link is EMLSR
     uint16_t paddingDelayUsec{32};
     uint16_t transitionDelayUsec{128};
-    Time channelSwitchDelay{"100us"};
+    Time channelSwitchDelay{"150us"};
     bool switchAuxPhy{false};//Aux Phy wait primary phy finish
     uint16_t auxPhyChWidth{20};
     bool auxPhyTxCapable{true}; // Can UPlink ?
@@ -583,7 +682,7 @@ int main(int argc, char* argv[])
                           // second link exists)
     double frequency3{6}; // whether the third link operates in the 2.4, 5 or 6 GHz (0 means no third link exists)
     
-    std::size_t nStations{3};
+    std::size_t nStations{5};
     std::string dlAckSeqType{"NO-OFDMA"};
     bool enableUlOfdma{false};
     bool enableBsrp{false};
@@ -637,7 +736,7 @@ int main(int argc, char* argv[])
               << "\t\t\t"
               << "Throughput" << '\n';
     //----------------------------------------
-    uint8_t mcs = 2;
+    uint8_t mcs = 4;
     mcsValues.push_back(mcs); 
     
     int minChannelWidth = 20;
@@ -747,6 +846,9 @@ int main(int argc, char* argv[])
                 SpectrumWifiPhyHelper phy(nLinks);
                 phy.SetPcapDataLinkType(WifiPhyHelper::DLT_IEEE802_11_RADIO);
                 phy.Set("ChannelSwitchDelay", TimeValue(channelSwitchDelay));
+                phy.Set("TxPowerStart", DoubleValue(20.0));
+                phy.Set("TxPowerEnd", DoubleValue(20.0));
+                phy.Set("TxPowerLevels", UintegerValue(1));
             //error model
                 phy.SetErrorRateModel("ns3::YansErrorRateModel");
                 
@@ -756,7 +858,7 @@ int main(int argc, char* argv[])
                             "QosSupported", BooleanValue(true),
                             "ActiveProbing",BooleanValue(false));
 
-                wifi.ConfigEhtOptions("EmlsrActivated",BooleanValue(false));
+                // wifi.ConfigEhtOptions("EmlsrActivated",BooleanValue(false));
 
                 mac.SetEmlsrManager(emlsrMgrTypeId,
                                     "EmlsrLinkSet",
@@ -777,15 +879,14 @@ int main(int argc, char* argv[])
                 for (uint8_t linkId = 0; linkId < nLinks; linkId++)
                 {
                     phy.Set(linkId, "ChannelSettings", StringValue(channelStr[linkId]));
-                    
                     auto spectrumChannel = CreateObject<MultiModelSpectrumChannel>();
                     
                     //signal loss model - have value ->hidden node
-                    auto lossModel = CreateObject<RangePropagationLossModel>();
-                    lossModel->SetAttribute("MaxRange",DoubleValue((maxRadius)*1.2));
+                    auto lossModel = CreateObject<LogDistancePropagationLossModel>();
                     // give channel my lossModel
                     // auto delayModel = CreateObject<ConstantSpeedPropagationDelayModel>();
                     // spectrumChannel->SetPropagationDelayModel(delayModel);
+
                     spectrumChannel->AddPropagationLossModel(lossModel);
                     phy.AddChannel(spectrumChannel, freqRanges[linkId]);
                     // std::cout << channelStr[linkId] << std::endl;
@@ -835,6 +936,11 @@ int main(int argc, char* argv[])
                 mac.SetEdca(AC_BK, "TxopLimits", StringValue(txopLimit));
                 mac.SetEdca(AC_VO, "TxopLimits", StringValue(txopLimit));
                 mac.SetEdca(AC_VI,"TxopLimits", StringValue(txopLimit));
+                phy.Set("TxPowerStart", DoubleValue(70.0));
+                phy.Set("TxPowerEnd", DoubleValue(70.0));
+                phy.Set("TxPowerLevels", UintegerValue(1));
+                phy.Set("TxGain", DoubleValue(0.0));
+                phy.Set("RxGain", DoubleValue(0.0));
                 apDevice = wifi.Install(phy, mac, wifiAPNode);
 
                 dev = wifiAPNode.Get(0)->GetDevice(0);
@@ -991,25 +1097,25 @@ int main(int argc, char* argv[])
                         
                         //{0x70, 0x28, 0xb8, 0xc0}; // AC_BE, AC_BK, AC_VI, AC_VO
                         //BE
-                        // ApplicationContainer clientAppBE = CreateClientFlow(0x70, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
-                        //                                                     0.015,0.025,0,0.005);
-                        // clientAppBE.Start(Seconds(1.0 ) + MicroSeconds(i * 100));
-                        // clientAppBE.Stop(simulationTime + Seconds(1));
-                        // //BK
-                        // ApplicationContainer clientAppBK = CreateClientFlow(0x28, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
-                        //                                                     0.03,0.05,0,0.01);
-                        // clientAppBE.Start(Seconds(1.0 ) + MicroSeconds(i * 100));
-                        // clientAppBE.Stop(simulationTime + Seconds(1));
+                        ApplicationContainer clientAppBE = CreateClientFlow(0x70, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
+                                                                            0.015,0.025,0,0.005);
+                        clientAppBE.Start(Seconds(1.0 ) + MicroSeconds(i * 100));
+                        clientAppBE.Stop(simulationTime + Seconds(1));
+                        //BK
+                        ApplicationContainer clientAppBK = CreateClientFlow(0x28, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
+                                                                            0.03,0.05,0,0.01);
+                        clientAppBE.Start(Seconds(1.0 ) + MicroSeconds(i * 100));
+                        clientAppBE.Stop(simulationTime + Seconds(1));
                         // //VI
-                        ApplicationContainer clientAppVI = CreateClientFlow(0xb8, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
-                                                                            0.2,1,0.1,2); 
-                        clientAppVI.Start(Seconds(1.0) + MicroSeconds(i * 100));
-                        clientAppVI.Stop(simulationTime + Seconds(1));
-                        // //VO
-                        ApplicationContainer clientAppVO = CreateClientFlow(0xc0, payloadSize-100,nonHtRefRateMbps,dest,clientNodes.Get(i),
-                                                                            0.5,1,1,2);
-                        clientAppVO.Start(Seconds(1.0 ) + MicroSeconds(i * 100));
-                        clientAppVO.Stop(simulationTime + Seconds(1));
+                        // ApplicationContainer clientAppVI = CreateClientFlow(0xb8, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
+                        //                                                     0.2,1,0.1,2); 
+                        // clientAppVI.Start(Seconds(1.0) + MicroSeconds(i * 100));
+                        // clientAppVI.Stop(simulationTime + Seconds(1));
+                        // // //VO
+                        // ApplicationContainer clientAppVO = CreateClientFlow(0xc0, payloadSize-100,nonHtRefRateMbps,dest,clientNodes.Get(i),
+                        //                                                     0.5,1,1,2);
+                        // clientAppVO.Start(Seconds(1.0 ) + MicroSeconds(i * 100));
+                        // clientAppVO.Stop(simulationTime + Seconds(1));
                     //test
                         // serverApp.Get(0)->TraceConnect("Rx", "", MakeCallback(&RxTrace));
                         // Ptr<WifiNetDevice> dev = staDevices.Get(0)->GetObject<WifiNetDevice>();
@@ -1098,6 +1204,7 @@ int main(int argc, char* argv[])
                {
                    Ptr<WifiPhy> phy = mloDevice->GetPhy(j);
                    phy->TraceConnectWithoutContext("PhyTxBegin",MakeBoundCallback(&PhyTxBeginTrace,mloDevice,j));
+                   phy->TraceConnectWithoutContext("PhyRxDrop", MakeBoundCallback(&MyDropCallback,j,mloDevice));
 
                }   
             }
@@ -1108,6 +1215,7 @@ int main(int argc, char* argv[])
                 const Ptr<WifiNetDevice> mloDevice = DynamicCast<WifiNetDevice>(apDevice.Get(0));
                 Ptr<WifiPhy> phy = mloDevice->GetPhy(i);
                 phy->TraceConnectWithoutContext("PhyRxDrop", MakeBoundCallback(&MyDropCallback,i,mloDevice));
+                phy->TraceConnectWithoutContext("MonitorSnifferRx",MakeBoundCallback(&SnifferRxCallback,i,mcs));
             }
 
                
