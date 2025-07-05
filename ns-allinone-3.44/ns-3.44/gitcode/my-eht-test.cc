@@ -74,6 +74,7 @@ struct TxRecord{
     double BER;
     double Signal;
     double Noise;
+    double SUC;
 };
 struct DropTable{
     Mac48Address addr;
@@ -159,7 +160,7 @@ static void PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Pa
 
     g_activeTx[key] = rec;
     
-     
+    //test:
     // std::cout << "Type : " << hdr.GetTypeString() 
     //           << "  pktSize : " << pktSize <<" Byte " 
     //           << " \nStartTime : " << rec.startTime.GetSeconds()<< "s"
@@ -176,7 +177,7 @@ static void PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Pa
 }
 
 void
-// + linkId,
+// MY FUNCTION
 MyDropCallback(uint32_t linkId, Ptr<WifiNetDevice> dev, Ptr<const Packet> p, WifiPhyRxfailureReason reason)
 {
     Time now = Simulator::Now();
@@ -199,6 +200,8 @@ MyDropCallback(uint32_t linkId, Ptr<WifiNetDevice> dev, Ptr<const Packet> p, Wif
             if(count == 0 && (lastMacAddr[linkId]!= cur.srcMac))
             {
                 apLinkTable[linkId].c_count += 1;
+
+                //test:
                 // std::cout << " link :" << linkId << " collision ! " << " LastStart : " << lastStart[linkId].GetSeconds()
                 //           << " StartTime : "<< cur.startTime.GetSeconds()  << "\n";
                 count++;
@@ -217,6 +220,8 @@ MyDropCallback(uint32_t linkId, Ptr<WifiNetDevice> dev, Ptr<const Packet> p, Wif
                 if(lastMacAddr[linkId]!= cur.srcMac)
                 {
                     apLinkTable[linkId].h_count += 1;
+
+                    //test:
                     // std::cout  << " link :" << linkId << " hidden_node ! "
                     //            << " lastEnd : " << lastEnd[linkId].GetSeconds()
                     //            << " StartTime : "<< cur.startTime.GetSeconds()
@@ -228,7 +233,7 @@ MyDropCallback(uint32_t linkId, Ptr<WifiNetDevice> dev, Ptr<const Packet> p, Wif
 
             }
         }
-        
+        //test:
         // std::cout << "srcMac :  "<< cur.srcMac 
         //           <<"\nnow : " << now.GetSeconds() <<"    startTime : " << cur.startTime.GetSeconds() << "    endTime : " <<cur.endTime.GetSeconds() 
         //           << "\nlink : " << linkId << " Type : "<< cur.Type << "  reason :  "  << reason  
@@ -263,15 +268,21 @@ SnifferRxCallback(uint32_t linkId, uint32_t mcs, Ptr<const Packet> p, uint16_t c
     double z = std::sqrt((1.5 * log2(16) * EbNo) / (16 - 1.0));
     double z1 = ((1.0 - 1.0 / std::sqrt(16)) * erfc(z));
     double z2 = 1 - std::pow((1 - z1), 2);
-    double BER = z2 / log2(16);
-    double SUC = std::pow(700, (1.0 - BER));
-    std::cout << "S : " << signal 
-              << " N : " << noise 
-              << " SNR_dB : " << snr_dB 
-              << " SNR_L : " << snr_linear
-              << " BER : " << BER 
-              << " SUC : " << SUC
-              << " DateRate : " << dr << "\n";
+    double BER = z2 / log2(16); //bit error rate
+
+    int bits = p->GetSize()*8;
+
+    double SUC = std::pow(1.0 - BER, bits); //Success rate
+    
+
+    //test:
+    // std::cout << "S : " << signal 
+    //           << " N : " << noise 
+    //           << " SNR_dB : " << snr_dB 
+    //           << " SNR_L : " << snr_linear
+    //           << " BER : " << BER 
+    //           << " SUC : " << SUC
+    //           << " DateRate : " << dr << "\n";
 
 
     auto it = g_activeTx.find(key);
@@ -280,7 +291,8 @@ SnifferRxCallback(uint32_t linkId, uint32_t mcs, Ptr<const Packet> p, uint16_t c
         TxRecord& cur = it->second;
         cur.Noise = noise;
         cur.Signal =signal;
-        cur.BER = BER ;
+        cur.BER = BER;
+        cur.SUC = SUC;
     }
     
 }
@@ -695,10 +707,17 @@ int main(int argc, char* argv[])
     // BSS size
     double maxRadius = 50.0;
 
-    CommandLine cmd(__FILE__);
-    //wait->connection Drop
+    //mcs & ChannelWidth gi
+    uint8_t mcs = 4;
+    mcsValues.push_back(mcs); 
     
-    cmd.Parse(argc, argv);
+    int minChannelWidth = 20;
+    int maxChannelWidth = 20;
+    
+    int minGi = 800;
+    int maxGi = 800;
+   
+  
 
     //Open RTS/CTS
     if (useRts)
@@ -727,7 +746,8 @@ int main(int argc, char* argv[])
         NS_ABORT_MSG("Invalid DL ack sequence type (must be NO-OFDMA, ACK-SU-FORMAT, MU-BAR or "
                      "AGGR-MU-BAR)");
     }
-    
+ 
+//----------------------------------------------------------------------------------------------------------
     std::cout << "MCS value"
               << "\t\t"
               << "Channel width"
@@ -735,16 +755,6 @@ int main(int argc, char* argv[])
               << "GI"
               << "\t\t\t"
               << "Throughput" << '\n';
-    //----------------------------------------
-    uint8_t mcs = 4;
-    mcsValues.push_back(mcs); 
-    
-    int minChannelWidth = 20;
-    int maxChannelWidth = 20;
-    
-    int minGi = 800;
-    int maxGi = 800;
-   
 
 
     for (const auto mcs : mcsValues)
@@ -846,8 +856,8 @@ int main(int argc, char* argv[])
                 SpectrumWifiPhyHelper phy(nLinks);
                 phy.SetPcapDataLinkType(WifiPhyHelper::DLT_IEEE802_11_RADIO);
                 phy.Set("ChannelSwitchDelay", TimeValue(channelSwitchDelay));
-                phy.Set("TxPowerStart", DoubleValue(20.0));
-                phy.Set("TxPowerEnd", DoubleValue(20.0));
+                phy.Set("TxPowerStart", DoubleValue(21.0));
+                phy.Set("TxPowerEnd", DoubleValue(21.0));
                 phy.Set("TxPowerLevels", UintegerValue(1));
             //error model
                 phy.SetErrorRateModel("ns3::YansErrorRateModel");
