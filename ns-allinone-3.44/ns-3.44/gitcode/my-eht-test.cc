@@ -71,10 +71,6 @@ struct TxRecord{
     Time endTime;
     Mac48Address srcMac; 
     std::string Type ;
-    double BER;
-    double Signal;
-    double Noise;
-    double SUC;
 };
 struct DropTable{
     Mac48Address addr;
@@ -86,25 +82,22 @@ struct LinkTable
     uint32_t c_count = 0;
     uint32_t n_count = 0;
     uint32_t h_count = 0;
+    uint32_t s_count = 0;
+    uint32_t unknown = 0;
+    uint32_t total_count = 0;
 };
+
 //global map
 std::map<std::pair<uint32_t, Mac48Address>,TxRecord> g_activeTx;
 std::vector<DropTable> StaDrop;
-std::vector<LinkTable> apLinkTable(3);
+std::vector<LinkTable> apLinkTable(3); //count 
 std::vector<Time> lastStart(3);
 std::vector<Time> lastEnd(3);
 std::vector<Mac48Address> lastMacAddr(3);
-
+double GlobalBER = 0;
+double GlobalSUC = 0;
 uint32_t count = 0;
-// static void cleanupTxRecord(uint16_t channel, Time now)
-// {
-//     if(g_activeTx.find(channel) == g_activeTx.end()) return;
-//     auto &vec = g_activeTx[channel];
 
-//     vec.erase(std::remove_if(vec.begin(),vec.end(),
-//                             [now](const TxRecord& rec){ return rec.endTime < now;}),
-//                             vec.end());
-// }
 
 //get Tx record
 WifiPhyBand GetBandFromFreq(uint16_t freq)
@@ -174,92 +167,50 @@ static void PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Pa
     //           << "  dstMac : " << hdr.GetAddr1()
     //           <<"\n-------------------------------------------------------------"
     //           << std::endl;
+    
+    // std ::cout <<"RX key : " << key << "  Tx srcMac : " << srcPHY <<"\n";
 }
 
 void
-// MY FUNCTION
-MyDropCallback(uint32_t linkId, Ptr<WifiNetDevice> dev, Ptr<const Packet> p, WifiPhyRxfailureReason reason)
+ClearElement()
 {
-    Time now = Simulator::Now();
-
-    WifiMacHeader hdr;
-    p->PeekHeader(hdr);
-    Mac48Address srcMac = hdr.GetAddr2(); //物理層address!!!! 非mac address!!!!
-    std::pair<uint32_t, Mac48Address> key = std::make_pair(linkId, srcMac);
-    
-
-
-    auto it = g_activeTx.find(key);
-    
-    if( it != g_activeTx.end())
+    for(uint32_t i = 0; i < 3; ++i)
     {
-        const TxRecord& cur = it->second;
-        StaDrop.push_back({srcMac, cur.startTime, cur.endTime });
-        if(std::abs((lastStart[linkId] - cur.startTime).GetMicroSeconds()) < 1)
-        {
-            if(count == 0 && (lastMacAddr[linkId]!= cur.srcMac))
-            {
-                apLinkTable[linkId].c_count += 1;
+        Time now = Simulator::Now();
+        std::cout << "Beacon : " << now.GetSeconds() * 10 <<"\n" 
+                  << "link : "         <<  i
+                  << "  collision : "     << apLinkTable[i].c_count 
+                  << "  hidden node : " << apLinkTable[i].h_count 
+                  << "  noise : "        << apLinkTable[i].n_count 
+                  << " success : " << apLinkTable[i].s_count
+                  << " unknown : " << apLinkTable[i].unknown
+                  << " total_real : " << apLinkTable[i].c_count + apLinkTable[i].h_count + apLinkTable[i].n_count + apLinkTable[i].s_count + apLinkTable[i].unknown
+                  << "\n---------------------------------------------------------------"<<"\n";
+        uint32_t total = apLinkTable[i].c_count + apLinkTable[i].h_count  + apLinkTable[i].n_count + apLinkTable[i].s_count;
+        
+        // if(apLinkTable[i].c_count/total > 0.2)
+        // {
 
-                //test:
-                // std::cout << " link :" << linkId << " collision ! " << " LastStart : " << lastStart[linkId].GetSeconds()
-                //           << " StartTime : "<< cur.startTime.GetSeconds()  << "\n";
-                count++;
-            }
-            else
-            {
-                count++;
-            }
+        // }
 
-        }
-        else
-        {
-            count = 0 ;
-            if(lastEnd[linkId] > cur.startTime && std::abs((lastStart[linkId] - cur.startTime).GetMicroSeconds()) > 5)
-            {
-                if(lastMacAddr[linkId]!= cur.srcMac)
-                {
-                    apLinkTable[linkId].h_count += 1;
+        //clean link i
+        apLinkTable[i].n_count = 0;
+        apLinkTable[i].h_count = 0;
+        apLinkTable[i].c_count = 0;
+        apLinkTable[i].s_count = 0;
+        apLinkTable[i].unknown = 0;
 
-                    //test:
-                    // std::cout  << " link :" << linkId << " hidden_node ! "
-                    //            << " lastEnd : " << lastEnd[linkId].GetSeconds()
-                    //            << " StartTime : "<< cur.startTime.GetSeconds()
-                    //            << " hidenTime :" << apLinkTable[linkId].h_count << "\n";
-                }
-            }
-            else if(lastMacAddr[linkId]!= cur.srcMac)
-            {
-
-            }
-        }
-        //test:
-        // std::cout << "srcMac :  "<< cur.srcMac 
-        //           <<"\nnow : " << now.GetSeconds() <<"    startTime : " << cur.startTime.GetSeconds() << "    endTime : " <<cur.endTime.GetSeconds() 
-        //           << "\nlink : " << linkId << " Type : "<< cur.Type << "  reason :  "  << reason  
-        //           << " Beacon : "<< now.GetSeconds() / double(0.1) << "\n"
-        //           << "---------------------------------------------------------------------------------------------------\n";
-        lastStart[linkId]   = cur.startTime;
-        lastEnd[linkId]     = cur.endTime;
-        lastMacAddr[linkId] = cur.srcMac;
     }
-                
+    Simulator::Schedule(Seconds(0.5), &ClearElement);
 }
 
-void 
-SnifferRxCallback(uint32_t linkId, uint32_t mcs, Ptr<const Packet> p, uint16_t channelFreqMhz, WifiTxVector txVector, MpduInfo aMpdu, SignalNoiseDbm signalNoise,uint16_t stdId)
+
+static void 
+SnifferRxCallback( uint32_t mcs, Ptr<const Packet> p, uint16_t channelFreqMhz, WifiTxVector txVector, MpduInfo aMpdu, SignalNoiseDbm signalNoise,uint16_t stdId)
 {
-    
-    WifiMacHeader hdr;
-    p->PeekHeader(hdr);
-    Mac48Address srcMac = hdr.GetAddr2(); //物理層address!!!! 非mac address!!!!
-    std::pair<uint32_t, Mac48Address> key = std::make_pair(linkId, srcMac);
-    
-    WifiMode mode = txVector.GetMode();
-    DataRate dr = EhtPhy::GetDataRate(mcs,MHz_u{static_cast<double>(20)},NanoSeconds(800), 1);
-    
+
     //BER Rate
-    
+    DataRate dr = EhtPhy::GetDataRate(mcs,MHz_u{static_cast<double>(20)},NanoSeconds(800), 1);
     double signal = signalNoise.signal; // dBm
     double noise  = signalNoise.noise;  // dBm
     double snr_dB = signal - noise;
@@ -272,9 +223,9 @@ SnifferRxCallback(uint32_t linkId, uint32_t mcs, Ptr<const Packet> p, uint16_t c
 
     int bits = p->GetSize()*8;
 
-    double SUC = std::pow(1.0 - BER, bits); //Success rate
+    GlobalSUC = std::pow(1.0 - BER, bits); //Success rate
+    GlobalBER = BER;
     
-
     //test:
     // std::cout << "S : " << signal 
     //           << " N : " << noise 
@@ -283,20 +234,107 @@ SnifferRxCallback(uint32_t linkId, uint32_t mcs, Ptr<const Packet> p, uint16_t c
     //           << " BER : " << BER 
     //           << " SUC : " << SUC
     //           << " DateRate : " << dr << "\n";
+}
+
+void
+// MY FUNCTION
+MyDropCallback(uint32_t linkId, Ptr<WifiNetDevice> dev, Ptr<const Packet> p, WifiPhyRxfailureReason reason)
+{
+    Time now = Simulator::Now();
+    
+    WifiMacHeader hdr;
+    p->PeekHeader(hdr);
+    Mac48Address srcMac = hdr.GetAddr2(); //物理層address!!!! 非mac address!!!!
+    std::pair<uint32_t, Mac48Address> key = std::make_pair(linkId, srcMac);
+    // std::cout << "Drop key :" << key << "\n";
 
 
     auto it = g_activeTx.find(key);
-    if(it != g_activeTx.end())
+    if( it != g_activeTx.end())
     {
-        TxRecord& cur = it->second;
-        cur.Noise = noise;
-        cur.Signal =signal;
-        cur.BER = BER;
-        cur.SUC = SUC;
+        const TxRecord& cur = it->second;
+        StaDrop.push_back({srcMac, cur.startTime, cur.endTime });
+        if(std::abs((lastStart[linkId] - cur.startTime).GetMicroSeconds()) < 3)
+        {
+            if(lastMacAddr[linkId]!= cur.srcMac)
+            {
+                apLinkTable[linkId].c_count += 1;
+
+                //test:
+                // std::cout << " link :" << linkId << " collision ! " << " LastStart : " << lastStart[linkId].GetSeconds()
+                //           << " StartTime : "<< cur.startTime.GetSeconds()  << "\n";
+                count++;
+            }
+            else
+            {
+                apLinkTable[linkId].unknown += 1;
+                count++;
+            }
+
+        }
+        else
+        {
+            count = 0 ;
+            if(lastEnd[linkId] > cur.startTime && std::abs((lastStart[linkId] - cur.startTime).GetMicroSeconds()) > 3)
+            {
+                if(lastMacAddr[linkId]!= cur.srcMac)
+                {
+                    apLinkTable[linkId].h_count += 1;
+
+                    // test:
+                    // std::cout  << " link :" << linkId << " hidden_node ! "
+                    //            << " lastEnd : " << lastEnd[linkId].GetSeconds()
+                    //            << " StartTime : "<< cur.startTime.GetSeconds()
+                    //            << " hidenTime :" << apLinkTable[linkId].h_count << "\n";
+                }
+            }
+            else if(lastMacAddr[linkId] !=  cur.srcMac)
+            {
+                Ptr<UniformRandomVariable> r = CreateObject<UniformRandomVariable>();
+                r->SetAttribute("Min", DoubleValue(0.0));
+                r->SetAttribute("Max", DoubleValue(1.0));
+                //test:
+                if(GlobalSUC < r->GetValue() && GlobalSUC != 0)
+                {
+                    apLinkTable[linkId].n_count += 1;
+                    // std:: cout <<"link : " << linkId <<"  noise : " <<apLinkTable[linkId].n_count << "        "<< GlobalSUC <<"    <    " << r->GetValue()<<"\n";
+
+                }
+                else
+                {
+                    apLinkTable[linkId].unknown += 1;
+                }
+
+
+            }
+            else
+            {
+                apLinkTable[linkId].unknown += 1;
+            }
+        }
+        // test:
+        // std::cout << "srcMac :  "<< cur.srcMac 
+        //           <<"\nnow : " << now.GetSeconds() <<"    startTime : " << cur.startTime.GetSeconds() << "    endTime : " <<cur.endTime.GetSeconds() 
+        //           << "\nlink : " << linkId << " Type : "<< cur.Type << "  reason :  "  << reason  
+        //           << " Beacon : "<< now.GetSeconds() / double(0.1) << "\n"
+        //           << "---------------------------------------------------------------------------------------------------\n";
+        apLinkTable[linkId].total_count += 1;
+        lastStart[linkId]   = cur.startTime;
+        lastEnd[linkId]     = cur.endTime;
+        lastMacAddr[linkId] = cur.srcMac;
     }
-    
+    else
+    {
+        std::cout << "error!" << "\n";
+    }
+                
 }
 
+void
+MySucCallback(uint32_t linkId, Ptr<const Packet> p)
+{
+    apLinkTable[linkId].s_count += 1;
+}
 //func
 MobilityHelper InstallApMove(NodeContainer wifiApNode)
 {
@@ -566,23 +604,7 @@ ApplicationContainer CreateClientFlow(UintegerValue ACLevel, UintegerValue paylo
   return clientApp;
 }
 
-void 
-MyRxCallback(Ptr<const WifiPsdu> psdu, RxSignalInfo info, const WifiTxVector &txvector,const std::vector<bool> &mpduStatus)
-{
-    std::cout << "packet get SNR: " << info.snr <<"dB"<< std::endl;
-}
-// packet receive
 
-void
-RxDropCallback(Ptr<const Packet> p, WifiPhyRxfailureReason reason)
-{
-    std::cout << "----------------------------" << "\n";
-    //Happen time
-    std::cout << "[PHY DROP time]: "
-              << Simulator::Now().GetSeconds()<<"s";
-    std::cout <<"\n[RxDrop] Packet UID = "<< p->GetUid() <<", Reason = " << reason <<"\n"<< std::endl;
-    
-}
 
 
 
@@ -605,7 +627,9 @@ GetRxBytes(bool udp, const ApplicationContainer& serverApp, uint32_t payloadSize
         for (uint32_t i = 0; i < serverApp.GetN(); i++)
         {
             rxBytes[i] = payloadSize * DynamicCast<UdpServer>(serverApp.Get(i))->GetReceived();
+            std ::cout <<DynamicCast<UdpServer>(serverApp.Get(i))->GetReceived() <<"\n";
         }
+        
     }
     else
     {
@@ -664,9 +688,10 @@ PrintIntermediateTput(std::vector<uint64_t>& rxBytes,
 
 int main(int argc, char* argv[])
 {
+    
     bool udp{true};
-    bool intterf(false);
-    bool useRts{true};
+    bool intterf(true);
+    bool useRts{false};
     bool flowinfo{false};
     bool STAaddr_linkid(false);
     uint16_t mpduBufferSize{512};
@@ -694,7 +719,7 @@ int main(int argc, char* argv[])
                           // second link exists)
     double frequency3{6}; // whether the third link operates in the 2.4, 5 or 6 GHz (0 means no third link exists)
     
-    std::size_t nStations{5};
+    std::size_t nStations{20};
     std::string dlAckSeqType{"NO-OFDMA"};
     bool enableUlOfdma{false};
     bool enableBsrp{false};
@@ -778,7 +803,6 @@ int main(int argc, char* argv[])
                 NodeContainer wifiStaNodes;
                 NetDeviceContainer staDevices;
                 wifiStaNodes.Create(nStations);
-
                 
                 WifiMacHelper mac;
                 WifiHelper wifi;
@@ -951,7 +975,12 @@ int main(int argc, char* argv[])
                 phy.Set("TxPowerLevels", UintegerValue(1));
                 phy.Set("TxGain", DoubleValue(0.0));
                 phy.Set("RxGain", DoubleValue(0.0));
+
                 apDevice = wifi.Install(phy, mac, wifiAPNode);
+                Config::Set ("/NodeList/*/DeviceList/*/$ns3::StaWifiMac/MaxMissedBeacons",UintegerValue (10000));
+                Config::Set ("/NodeList/*/DeviceList/*/$ns3::StaWifiMac/ListenInterval",UintegerValue (1));
+                Config::Set ("/NodeList/*/DeviceList/*/$ns3::ApWifiMac/AssocFailTimeout", TimeValue (Seconds (0))); 
+                Config::Set ("/NodeList/*/DeviceList/*/$ns3::ApWifiMac/DisassocTimeout", TimeValue (Seconds (0)));
 
                 dev = wifiAPNode.Get(0)->GetDevice(0);
                 wifi_dev = DynamicCast<WifiNetDevice>(dev);
@@ -1001,61 +1030,61 @@ int main(int argc, char* argv[])
 
                 for(u_int32_t i = 0; i < interferNum; i++)
                 {
-                double currentTime2_4 = 0.0;
-                while(currentTime2_4 < simStopTIme)
-                {
-                    double onTime = onTimeVar-> GetValue();
-                    double offTime = offTimeVar -> GetValue();
-                     Simulator::Schedule(Seconds(onTime),
-                                        &WaveformGenerator::Start,
-                                        interferers2_4.Get(i)
-                                            ->GetObject<NonCommunicatingNetDevice>()
-                                            ->GetPhy()
-                                            ->GetObject<WaveformGenerator>());
+                    double currentTime2_4 = 0.0;
+                    while(currentTime2_4 < simStopTIme)
+                    {
+                        double onTime = onTimeVar-> GetValue();
+                        double offTime = offTimeVar -> GetValue();
+                        Simulator::Schedule(Seconds(onTime),
+                                            &WaveformGenerator::Start,
+                                            interferers2_4.Get(i)
+                                                ->GetObject<NonCommunicatingNetDevice>()
+                                                ->GetPhy()
+                                                ->GetObject<WaveformGenerator>());
 
-                    Simulator::Schedule(Seconds(currentTime2_4 + onTime),
-                                        &WaveformGenerator::Stop,
-                                        interferers2_4.Get(i)
-                                            ->GetObject<NonCommunicatingNetDevice>()
-                                            ->GetPhy()
-                                            ->GetObject<WaveformGenerator>());
-                    currentTime2_4 += (onTime + offTime);
-                }    
-                double currentTime5 = 0;
-                while(currentTime5 < simStopTIme)
-                {
-                    double onTime = onTimeVar-> GetValue();
-                    double offTime = offTimeVar -> GetValue();
-                    Simulator::Schedule(Seconds(currentTime5),&WaveformGenerator::Start,
-                                        interferers5.Get(i)
-                                            ->GetObject<NonCommunicatingNetDevice>()
-                                            ->GetPhy()
-                                            ->GetObject<WaveformGenerator>());
+                        Simulator::Schedule(Seconds(currentTime2_4 + onTime),
+                                            &WaveformGenerator::Stop,
+                                            interferers2_4.Get(i)
+                                                ->GetObject<NonCommunicatingNetDevice>()
+                                                ->GetPhy()
+                                                ->GetObject<WaveformGenerator>());
+                        currentTime2_4 += (onTime + offTime);
+                    }    
+                    double currentTime5 = 0;
+                    while(currentTime5 < simStopTIme)
+                    {
+                        double onTime = onTimeVar-> GetValue();
+                        double offTime = offTimeVar -> GetValue();
+                        Simulator::Schedule(Seconds(currentTime5),&WaveformGenerator::Start,
+                                            interferers5.Get(i)
+                                                ->GetObject<NonCommunicatingNetDevice>()
+                                                ->GetPhy()
+                                                ->GetObject<WaveformGenerator>());
 
-                    Simulator::Schedule(Seconds(currentTime5 + onTime),&WaveformGenerator::Stop,
-                                        interferers5.Get(i)
-                                            ->GetObject<NonCommunicatingNetDevice>()
-                                            ->GetPhy()
-                                            ->GetObject<WaveformGenerator>());
-                    currentTime5 += (onTime + offTime);
-                }
-                double currentTime6 = 0;
-                while(currentTime6 < simStopTIme)
-                {
-                    double onTime = onTimeVar-> GetValue();
-                    double offTime = offTimeVar -> GetValue();
-                    Simulator::Schedule(Seconds(currentTime6),&WaveformGenerator::Start,
-                                        interferers6.Get(i)
-                                            ->GetObject<NonCommunicatingNetDevice>()
-                                            ->GetPhy()
-                                            ->GetObject<WaveformGenerator>());
-                    Simulator::Schedule(Seconds(currentTime6 + onTime),&WaveformGenerator::Stop,
-                                        interferers6.Get(i)
-                                            ->GetObject<NonCommunicatingNetDevice>()
-                                            ->GetPhy()
-                                            ->GetObject<WaveformGenerator>());
-                    currentTime6 += (onTime + offTime);
-                }
+                        Simulator::Schedule(Seconds(currentTime5 + onTime),&WaveformGenerator::Stop,
+                                            interferers5.Get(i)
+                                                ->GetObject<NonCommunicatingNetDevice>()
+                                                ->GetPhy()
+                                                ->GetObject<WaveformGenerator>());
+                        currentTime5 += (onTime + offTime);
+                    }
+                    double currentTime6 = 0;
+                    while(currentTime6 < simStopTIme)
+                    {
+                        double onTime = onTimeVar-> GetValue();
+                        double offTime = offTimeVar -> GetValue();
+                        Simulator::Schedule(Seconds(currentTime6),&WaveformGenerator::Start,
+                                            interferers6.Get(i)
+                                                ->GetObject<NonCommunicatingNetDevice>()
+                                                ->GetPhy()
+                                                ->GetObject<WaveformGenerator>());
+                        Simulator::Schedule(Seconds(currentTime6 + onTime),&WaveformGenerator::Stop,
+                                            interferers6.Get(i)
+                                                ->GetObject<NonCommunicatingNetDevice>()
+                                                ->GetPhy()
+                                                ->GetObject<WaveformGenerator>());
+                        currentTime6 += (onTime + offTime);
+                    }
                 }
             } 
             /* Internet stack*/
@@ -1105,10 +1134,11 @@ int main(int argc, char* argv[])
                     {   
                         AddressValue remoteAddress(dest);
                         
+
                         //{0x70, 0x28, 0xb8, 0xc0}; // AC_BE, AC_BK, AC_VI, AC_VO
                         //BE
                         ApplicationContainer clientAppBE = CreateClientFlow(0x70, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
-                                                                            0.015,0.025,0,0.005);
+                                                                            0.0015,0.025,0,0.005);
                         clientAppBE.Start(Seconds(1.0 ) + MicroSeconds(i * 100));
                         clientAppBE.Stop(simulationTime + Seconds(1));
                         //BK
@@ -1116,21 +1146,19 @@ int main(int argc, char* argv[])
                                                                             0.03,0.05,0,0.01);
                         clientAppBE.Start(Seconds(1.0 ) + MicroSeconds(i * 100));
                         clientAppBE.Stop(simulationTime + Seconds(1));
-                        // //VI
-                        // ApplicationContainer clientAppVI = CreateClientFlow(0xb8, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
-                        //                                                     0.2,1,0.1,2); 
-                        // clientAppVI.Start(Seconds(1.0) + MicroSeconds(i * 100));
-                        // clientAppVI.Stop(simulationTime + Seconds(1));
+                        // // //VI
+                        ApplicationContainer clientAppVI = CreateClientFlow(0xb8, payloadSize,nonHtRefRateMbps,dest,clientNodes.Get(i),
+                                                                            0.2,1,0.1,2); 
+                        clientAppVI.Start(Seconds(1.0) + MicroSeconds(i * 100));
+                        clientAppVI.Stop(simulationTime + Seconds(1));
                         // // //VO
-                        // ApplicationContainer clientAppVO = CreateClientFlow(0xc0, payloadSize-100,nonHtRefRateMbps,dest,clientNodes.Get(i),
-                        //                                                     0.5,1,1,2);
-                        // clientAppVO.Start(Seconds(1.0 ) + MicroSeconds(i * 100));
-                        // clientAppVO.Stop(simulationTime + Seconds(1));
+                        ApplicationContainer clientAppVO = CreateClientFlow(0xc0, payloadSize-100,nonHtRefRateMbps,dest,clientNodes.Get(i),
+                                                                            0.5,1,1,2);
+                        clientAppVO.Start(Seconds(1.0 ) + MicroSeconds(i * 100));
+                        clientAppVO.Stop(simulationTime + Seconds(1));
                     //test
-                        // serverApp.Get(0)->TraceConnect("Rx", "", MakeCallback(&RxTrace));
                         // Ptr<WifiNetDevice> dev = staDevices.Get(0)->GetObject<WifiNetDevice>();
                         // Ptr<WifiPhy> pp = dev->GetPhy();
-                        // Ptr<YansErrorRateModel> yans =DynamicCast<YansErrorRateModel>(err);
                         // pp->SetReceiveOkCallback(MyRxCallback);
 
 
@@ -1167,7 +1195,8 @@ int main(int argc, char* argv[])
                         clientApp.Stop(simulationTime + Seconds(1));
                     }
                 }
-        //--------------------------system info and function(my)--------------------------------------
+        
+                //--------------------------system info and function(my)--------------------------------------
         
             // cumulative number of bytes received by each server application
                 std::vector<uint64_t> cumulRxBytes(nStations, 0);
@@ -1206,6 +1235,19 @@ int main(int argc, char* argv[])
             }
             //trace
 
+            //物理層錯誤查詢 (ap)
+           
+
+            for(uint32_t i = 0; i < nLinks; ++i)
+            {
+                const Ptr<WifiNetDevice> mloDevice = DynamicCast<WifiNetDevice>(apDevice.Get(0));
+                Ptr<WifiPhy> phy = mloDevice->GetPhy(i);
+                phy->TraceConnectWithoutContext("MonitorSnifferRx",MakeBoundCallback(&SnifferRxCallback, mcs));
+                phy->TraceConnectWithoutContext("PhyRxDrop", MakeBoundCallback(&MyDropCallback,i , mloDevice));
+                phy->TraceConnectWithoutContext("PhyRxEnd", MakeBoundCallback(&MySucCallback, i));
+            }
+
+
             //物理層傳送的封包資訊
             for(uint32_t i = 0; i < nStations; ++i)
             {
@@ -1214,22 +1256,14 @@ int main(int argc, char* argv[])
                {
                    Ptr<WifiPhy> phy = mloDevice->GetPhy(j);
                    phy->TraceConnectWithoutContext("PhyTxBegin",MakeBoundCallback(&PhyTxBeginTrace,mloDevice,j));
-                   phy->TraceConnectWithoutContext("PhyRxDrop", MakeBoundCallback(&MyDropCallback,j,mloDevice));
 
                }   
             }
-
-            //物理層錯誤查詢
-            for(uint32_t i = 0; i < nLinks; ++i)
-            {
-                const Ptr<WifiNetDevice> mloDevice = DynamicCast<WifiNetDevice>(apDevice.Get(0));
-                Ptr<WifiPhy> phy = mloDevice->GetPhy(i);
-                phy->TraceConnectWithoutContext("PhyRxDrop", MakeBoundCallback(&MyDropCallback,i,mloDevice));
-                phy->TraceConnectWithoutContext("MonitorSnifferRx",MakeBoundCallback(&SnifferRxCallback,i,mcs));
-            }
+            
 
                
             //start--------------------------------------
+                Simulator::Schedule(Seconds(0.0),&ClearElement);
                 Simulator::Stop(simulationTime + Seconds(1)); //end time (need define before simulator::Run())
                 Simulator::Run();
 
