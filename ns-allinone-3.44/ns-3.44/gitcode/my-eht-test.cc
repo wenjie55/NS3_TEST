@@ -70,6 +70,8 @@ struct TxRecord{
     Time endTime;
     Mac48Address srcMac; 
     std::string Type ;
+    double signaldBm =-68.7;
+    double noisedBm = -80 ;
 };
 struct DropTable{
     Mac48Address addr;
@@ -77,9 +79,10 @@ struct DropTable{
     Time endTime;
 };
 
-//my function use table & count
+//my function use table & count &
 struct LinkTable
 {
+    uint32_t B_cnt = 0 ; //HCCA open time
     uint32_t c_count = 0;
     uint32_t n_count = 0;
     uint32_t h_count = 0;
@@ -87,15 +90,16 @@ struct LinkTable
     uint32_t unknown = 0;
     uint32_t total_count = 0;
     std::map<Mac48Address,uint32_t> hideTable;
-    std::vector<std::pair<uint32_t,uint32_t>> HN_list;
-    std::vector<uint32_t> HN_QueueVO;
-    std::vector<uint32_t> HN_QueueVI;
-    std::vector<uint32_t> HN_QueueBE;
-    std::vector<uint32_t> HN_QueueBK;
+    std::vector<std::pair<uint32_t,uint32_t>> HN_list; //STAID ,QueueSize
+    std::queue<uint32_t> HN_Queue;
+
+    std::map<Mac48Address,uint32_t> NoiseTable;
+    std::vector<Mac48Address> Noise_list;
+    bool HCCA = false;
     double Pab = 1;
 };
 
-//global map
+//global
 std::map<std::pair<uint32_t, Mac48Address>,TxRecord> g_activeTx;
 std::vector<DropTable> StaDrop;
 std::vector<LinkTable> apLinkTable(3); //count 
@@ -103,10 +107,11 @@ std::vector<Time> lastStart(3);
 std::vector<Time> lastEnd(3);
 std::vector<Mac48Address> lastMacAddr(3);
 
+
 double GlobalBER = 0;
 double GlobalSUC = 0;
 Time beaconInterval = MilliSeconds (100);
-double HN_threshold = 0.00;
+double HN_threshold = 0.05;
 
 //my function 
 WifiPhyBand GetBandFromFreq(uint16_t freq)
@@ -130,7 +135,8 @@ WifiPhyBand GetBandFromFreq(uint16_t freq)
 }
 
 //Get  STA : TX startTime & endTime   STA info : link ID  + srcMAc + packet type
-static void PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Packet> packet, Watt_u txDbm)
+static void 
+PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Packet> packet, Watt_u txDbm)
 {
     
     Ptr<Node> node = dev->GetNode();
@@ -149,19 +155,17 @@ static void PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Pa
     Time duration = phy->CalculateTxDuration(pktSize,txVector,GetBandFromFreq(phy->GetFrequency()));
     
     // 記錄傳輸事件
-    TxRecord rec;
-    rec.txNode    = node;
-    rec.nodeId    = nodeId;
-    rec.channel   = channelNum;
-    rec.linkId    = linkId;
-    rec.startTime = Simulator::Now();
-    rec.endTime   = Simulator::Now() + duration;
-    rec.srcMac    = Mac48Address::ConvertFrom(dev->GetAddress());
-    Mac48Address srcPHY = hdr.GetAddr2();
-    rec.Type      = hdr.GetTypeString() ; 
+    Mac48Address srcPHY = hdr.GetAddr2(); 
     std::pair<uint32_t, Mac48Address> key = std::make_pair(linkId,srcPHY); //LinkId +PHYaddr -> Macaddr
 
-    g_activeTx[key] = rec;
+    g_activeTx[key].txNode = node;
+    g_activeTx[key].nodeId = nodeId;
+    g_activeTx[key].channel = channelNum;
+    g_activeTx[key].linkId = linkId;
+    g_activeTx[key].startTime = Simulator::Now();
+    g_activeTx[key].endTime = Simulator::Now() + duration;
+    g_activeTx[key].srcMac = Mac48Address::ConvertFrom(dev->GetAddress());
+    g_activeTx[key].Type = hdr.GetTypeString() ;
     
     //test:
     // std::cout << "Type : " << hdr.GetTypeString() 
@@ -175,6 +179,7 @@ static void PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Pa
     //           << "\nsrcMac : " << rec.srcMac
     //           << "  SrcPHY : " << srcPHY
     //           << "  dstMac : " << hdr.GetAddr1()
+    //           << " signalDb : " <<  signalDbm
     //           <<"\n-------------------------------------------------------------"
     //           << std::endl;
     
@@ -200,7 +205,7 @@ ClearElement(NodeContainer STA)
 
         double total = apLinkTable[i].c_count + apLinkTable[i].h_count  + apLinkTable[i].n_count + apLinkTable[i].s_count;
 
-        double Pc = apLinkTable[i].c_count/total;
+        double Pc = apLinkTable[i].c_count / total;
         double Pt = 0;
         double Pab = 1;
         double Ph = apLinkTable[i].h_count / total;
@@ -208,6 +213,9 @@ ClearElement(NodeContainer STA)
 
         //Access Barring - Collision
         std::cout<< "\nPc : " << Pc << "\n";
+        std::cout<< "\nPh : " << Ph << "\n";
+        std::cout<< "\nPn : " << Ph << "\n";
+
         if(Pc > 0.2)
         {
             Pt = 1.0 - std::pow(1.0 - Pc, 1.0 / (STA.GetN() - 1));
@@ -219,18 +227,25 @@ ClearElement(NodeContainer STA)
             Pab = 1; 
         }
 
+        
         //HCCA - hidden node
+
+        apLinkTable[i].HN_list.clear();
+        std::queue<uint32_t> empty;
+        std::swap(apLinkTable[i].HN_Queue,empty);
+
         if(Ph > HN_threshold) //0.05
-        {   uint32_t NHN = apLinkTable[i].hideTable.size();
-            double AVG_HN =  apLinkTable[i].h_count / NHN;
-            std::vector<uint32_t> HN_list;
+        {   //startHCCA
+            uint32_t NHN = apLinkTable[i].hideTable.size(); // num of hidden node
+
+            double AVG_HN =  apLinkTable[i].h_count / NHN;  //  happen count / num of hidden node 
 
             for (auto const& kv : apLinkTable[i].hideTable) 
             {
                 const Mac48Address& addr = kv.first;
                 uint32_t            cnt  = kv.second;
 
-                if( cnt > AVG_HN ) // 大於平均值進行處理
+                if( cnt > AVG_HN )  
                 {
                     for(uint32_t j = 0; j < STA.GetN(); j++)
                     {
@@ -241,8 +256,7 @@ ClearElement(NodeContainer STA)
                         if( linkAddress == addr)
                         {
                             uint32_t STA_Byte = 0;
-                            
-                            Ptr<WifiMacQueue>  Queue = DevUMac->GetQosTxop(AC_VO)->GetWifiMacQueue();
+                            Ptr<WifiMacQueue>  Queue = DevUMac->GetQosTxop(AC_VO)->GetWifiMacQueue(); //VO : 3 , VI : 2 , BE : 1 , BK : 0
                             uint32_t nPackets = Queue->GetNPackets (); 
                             uint32_t nBytes   = Queue->GetNBytes   ();
                             // std::cout << "STA : " << j << " AC_VO " <<" nByte : " << nBytes <<"\n"; 
@@ -264,64 +278,111 @@ ClearElement(NodeContainer STA)
                             nBytes   = Queue->GetNBytes   ();
                             // std::cout << "STA : " << j << " AC_BK " <<" nByte : " << nBytes <<"\n"; 
                             STA_Byte += nBytes;
+                            
 
                             //test :
                             
-                            // std::cout << "STA : " << j << " nByte : " << STA_Byte <<"\n"; 
+                            std::cout << "STA : " << j << " nByte : " << STA_Byte <<"\n"; 
                         
                             apLinkTable[i].HN_list.push_back(std::make_pair(j, STA_Byte));
                         }  
                     }
                 }
             }
-            
+
+    
+            //open HCCA
+            if(!(apLinkTable[i].HN_list.empty()))
+            {
+                apLinkTable[i].HCCA = true;
+                apLinkTable[i].B_cnt = 4;
+
+            }
+            else
+            {
+                apLinkTable[i].HCCA = false;
+                apLinkTable[i].B_cnt = 0;
+                break;
+            } 
             std::sort(apLinkTable[i].HN_list.begin(), apLinkTable[i].HN_list.end(),
                       [](auto const& a, auto const& b){ return a.second > b.second; });
 
-            // clear 4 ac queue
-            apLinkTable[i].HN_QueueVO.clear();
-            apLinkTable[i].HN_QueueVI.clear();
-            apLinkTable[i].HN_QueueBE.clear();
-            apLinkTable[i].HN_QueueBK.clear();
+            
             //Q_VO, Q_VI, Q_BE, Q_BK
-            for(uint32_t ac = 0; ac < 4; ac++)
+            for(auto const& HN : apLinkTable[i].HN_list)
             {
-                for(auto const& HN : apLinkTable[i].HN_list)
+                for(uint32_t ac = 0; ac < 4; ac++)
                 {
-                   uint32_t STAId = HN.first;
-                   Ptr<WifiNetDevice> wifiDev = DynamicCast<WifiNetDevice>(STA.Get(STAId)->GetDevice(0));
-                   Ptr<StaWifiMac> DevUMac = DynamicCast<StaWifiMac>(wifiDev->GetMac());
-                   if(ac == 0)
-                   {
-                       Ptr<WifiMacQueue>  Queue = DevUMac->GetQosTxop(AC_VO)->GetWifiMacQueue();
-                       uint32_t nBytes   = Queue->GetNBytes   ();
-                       if(nBytes != 0) apLinkTable[i].HN_QueueVO.push_back(STAId);
-                       
-                   }else if( ac == 1)
-                   {
-                       Ptr<WifiMacQueue>  Queue = DevUMac->GetQosTxop(AC_VI)->GetWifiMacQueue();
-                       uint32_t nBytes   = Queue->GetNBytes   ();
-                       if(nBytes != 0) apLinkTable[i].HN_QueueVI.push_back(STAId);
-                       
-                   }else if( ac == 2)
-                   {
-                       Ptr<WifiMacQueue>  Queue = DevUMac->GetQosTxop(AC_BE)->GetWifiMacQueue();
-                       uint32_t nBytes   = Queue->GetNBytes   ();
-                       if(nBytes != 0) apLinkTable[i].HN_QueueBE.push_back(STAId);
-                   }else if( ac == 3)
-                   {
-                       Ptr<WifiMacQueue>  Queue = DevUMac->GetQosTxop(AC_BK)->GetWifiMacQueue();
-                       uint32_t nBytes   = Queue->GetNBytes   ();
-                       if(nBytes != 0) apLinkTable[i].HN_QueueBK.push_back(STAId);
-                   }
+                    uint32_t STAId = HN.first;
+                    Ptr<WifiNetDevice> wifiDev = DynamicCast<WifiNetDevice>(STA.Get(STAId)->GetDevice(0));
+                    Ptr<StaWifiMac> DevUMac = DynamicCast<StaWifiMac>(wifiDev->GetMac());
+                    Ptr<WifiMacQueue>  Q = DevUMac->GetQosTxop(3 - ac)->GetWifiMacQueue();
+                    uint32_t nBytes   = Q->GetNBytes ();
+                    if(nBytes != 0) 
+                    {
+                        apLinkTable[i].HN_Queue.push(STAId);
+                        break;
+                    }
                 }
             }
             
             // test: hidden node
-            // for(auto it = apLinkTable[i].HN_list.begin(); it!=apLinkTable[i].HN_list.end(); ++it)
-            // std::cout <<it->first << " : " << it->second << "\n";
+            std::cout << "hiden node :" << "\n";
+            for(auto it = apLinkTable[i].HN_list.begin(); it != apLinkTable[i].HN_list.end(); ++it)
+            std::cout <<it->first << " : " << it->second << "\n";
 
+
+            // std::queue q = apLinkTable[i].HN_Queue;
+            // while(!(q.empty()))
+            // {
+            //     std::cout<< q.front()<<" ";
+            //     q.pop();
+            // }
+            // std::cout << "\n";
         }
+        else
+        {
+            apLinkTable[i].B_cnt = 0;
+            apLinkTable[i].HCCA = false;
+        }
+        
+        apLinkTable[i].Noise_list.clear();
+        uint32_t NN = apLinkTable[i].NoiseTable.size(); // num of Noise
+        double StdDev = 0;
+        double sum = 0;  
+        if(NN != 0)
+        {
+            uint32_t AVG_N =  apLinkTable[i].n_count / NN;
+            for(auto const& Nv : apLinkTable[i].NoiseTable)
+            {
+                const Mac48Address& addr = Nv.first;
+                uint32_t            cnt  = Nv.second;
+                sum += (cnt - AVG_N) * (cnt - AVG_N);
+            }
+
+            StdDev = sqrt(sum/NN);
+            // std::cout << "sum : " << sum << " AVG : " << AVG_N <<  "  NN : " << NN << "  Std : " << StdDev << "\n";
+
+            for(auto const& Nv : apLinkTable[i].NoiseTable)
+            {
+                const Mac48Address& addr = Nv.first;
+                uint32_t            cnt  = Nv.second;
+                if((cnt / StdDev) > 2)
+                {
+                    apLinkTable[i].Noise_list.push_back(addr);
+                }
+            }
+            
+        }
+        
+
+        for(auto itt = apLinkTable[i].NoiseTable.begin(); itt!= apLinkTable[i].NoiseTable.end(); ++itt)
+        std::cout << itt->first << " : " << itt->second << "\n";
+
+        for(const auto& addr : apLinkTable[i].Noise_list)
+        std::cout << "Noise STA: " << addr << "\n";
+        
+
 
         //clean link i
         apLinkTable[i].n_count = 0;
@@ -331,24 +392,48 @@ ClearElement(NodeContainer STA)
         apLinkTable[i].unknown = 0;
         apLinkTable[i].Pab = Pab;
         apLinkTable[i].hideTable.clear();
-        apLinkTable[i].HN_list.clear();
+        apLinkTable[i].NoiseTable.clear();
         std::cout << "\n---------------------------------------------------------------"<<"\n";
     }
-
-    
-
     Simulator::Schedule(Seconds(0.5), &ClearElement,STA);
 }
 
-void 
-//STA Access Baring  
-function2(NodeContainer STA)
-{
+void
+HCCAshchule(NodeContainer STA, uint32_t link, Time StopTime, uint32_t lastSTAId)
+{   
+    auto &q = apLinkTable[link].HN_Queue;
+
+    // uint32_t M = q.size(); 
+    // std::cout << "M :" << M <<"\n";
+
     Time now = Simulator::Now();
-    for(uint32_t i = 0; i < STA.GetN(); i++)
+
+    Ptr<WifiNetDevice> lastwifiDev = DynamicCast<WifiNetDevice>(STA.Get(lastSTAId)->GetDevice(0));
+    Ptr<StaWifiMac> lastDevMac = DynamicCast<StaWifiMac>(lastwifiDev->GetMac());
+
+    if(apLinkTable[link].HCCA) apLinkTable[link].HCCA = false;
+    else lastDevMac->BlockTxOnLink(link, WifiQueueBlockedReason::POWER_SAVE_MODE);
+ 
+    if( now < StopTime && !(q.empty()))
     {
+        uint32_t STAId = q.front();
+        q.pop();
+        // std::cout <<"STA Id : " << STAId <<" link :" << link << '\n';
+        Ptr<WifiNetDevice> wifiDev = DynamicCast<WifiNetDevice>(STA.Get(STAId)->GetDevice(0));
+        Ptr<StaWifiMac> DevMac = DynamicCast<StaWifiMac>(wifiDev->GetMac());
+        Ptr<WifiPhy> phy = wifiDev->GetPhy(link);
+       
+        
+        std::set<uint8_t> No;
+        No.insert(link);
+        DevMac->UnblockTxOnLink(No,WifiQueueBlockedReason::POWER_SAVE_MODE);
+        Simulator::Schedule(Seconds(0.0010),&HCCAshchule,STA, link, StopTime, STAId); 
+    }
+    else
+    {
+        // std::cout<< "link : " << link << " out!" << "\n";
         Ptr<UniformRandomVariable> ran = CreateObject<UniformRandomVariable>();
-        for( uint8_t link = 0; link < 3; link ++)
+        for(uint32_t i = 0; i < STA.GetN(); i++) 
         {
             double r = ran->GetValue();
             Ptr<WifiNetDevice> wifiDev = DynamicCast<WifiNetDevice>(STA.Get(i)->GetDevice(0));
@@ -356,25 +441,114 @@ function2(NodeContainer STA)
 
             if((apLinkTable[link].Pab + 0.0001) < r)
             {
-                DevMac->BlockTxOnLink(link,WifiQueueBlockedReason::POWER_SAVE_MODE); 
-                // std::cout << " STA" << i << " Link :" << link  << " is block \n";                 
+                DevMac->BlockTxOnLink(link,WifiQueueBlockedReason::POWER_SAVE_MODE);                
             }
             else
             {
-               std::set<uint8_t> No;
-               No.insert(link);
-               DevMac->UnblockTxOnLink(No,WifiQueueBlockedReason::POWER_SAVE_MODE);
+                //need to use set
+                std::set<uint8_t> No;
+                No.insert(link);
+                DevMac->UnblockTxOnLink(No,WifiQueueBlockedReason::POWER_SAVE_MODE);
             }
+            
+        }
+
+        apLinkTable[link].B_cnt -= 1;
+        if(apLinkTable[link].B_cnt > 0)
+        {
+            bool flag = true;
+            for(const auto &p : apLinkTable[link].HN_list)
+            {
+                Ptr<WifiNetDevice> wifiDev = DynamicCast<WifiNetDevice>(STA.Get(p.first)->GetDevice(0));
+                Ptr<StaWifiMac> DevMac = DynamicCast<StaWifiMac>(wifiDev->GetMac());
+                DevMac->BlockTxOnLink(link,WifiQueueBlockedReason::POWER_SAVE_MODE);
+                for(uint32_t ac = 0; ac < 4 ; ac++)
+                {
+                    Ptr<WifiMacQueue> AC_Q = DevMac->GetQosTxop(3-ac)->GetWifiMacQueue();
+                    uint32_t nByte = AC_Q->GetNBytes();
+                    if(nByte)
+                    {
+                        flag = false;
+                        apLinkTable[link].HN_Queue.push(p.first);
+                        break;
+                    }
+                }
+            }
+            if(flag) apLinkTable[link].HCCA = false;
+            else apLinkTable[link].HCCA =true;
+
+            // std::cout <<  "link : " << link <<" apLinkTable[link].B_cnt : " << apLinkTable[link].B_cnt << "\n";
+            // std::queue q2 = apLinkTable[link].HN_Queue;
+            // while(!(q2.empty()))
+            // {
+            //     std::cout<< q2.front() << " ";
+            //     q2.pop();
+            // }
+            // std::cout << "\n";
         }
     }
+}
+
+void //HCCA & AB
+function2(NodeContainer STA)
+{
+    Time now = Simulator::Now(); 
+
+    for( uint8_t link = 0; link < 3; link ++)
+    { 
+        //HCCA       
+        if(apLinkTable[link].HCCA)
+        {   //all STA stop
+            for(uint32_t stopSTA = 0; stopSTA < STA.GetN(); stopSTA++)
+            {
+                Ptr<WifiNetDevice> wifiDev = DynamicCast<WifiNetDevice>(STA.Get(stopSTA)->GetDevice(0));
+                Ptr<StaWifiMac> DevMac = DynamicCast<StaWifiMac>(wifiDev->GetMac());
+                DevMac->BlockTxOnLink(link,WifiQueueBlockedReason::POWER_SAVE_MODE);
+            }
+
+            //Open HCCA
+            Time StartTime = now + MicroSeconds(1);
+            Time StopTime = now + MilliSeconds(10);
+            uint32_t STAId = apLinkTable[link].HN_Queue.front();
+            Simulator::Schedule(Seconds(0.000001),&HCCAshchule, STA ,link, StopTime, STAId);
+        }
+        else
+        {
+            //STA Access Baring 
+            Ptr<UniformRandomVariable> ran = CreateObject<UniformRandomVariable>();
+            for(uint32_t i = 0; i < STA.GetN(); i++)
+            {
+                double r = ran->GetValue();
+                Ptr<WifiNetDevice> wifiDev = DynamicCast<WifiNetDevice>(STA.Get(i)->GetDevice(0));
+                Ptr<StaWifiMac> DevMac = DynamicCast<StaWifiMac>(wifiDev->GetMac());
+                if((apLinkTable[link].Pab + 0.0001) < r)
+                {
+                    DevMac->BlockTxOnLink(link,WifiQueueBlockedReason::POWER_SAVE_MODE); 
+                    // std::cout << " STA" << i << " Link :" << link  << " is block \n";                 
+                }
+                else
+                {
+                    //need to use set
+                    std::set<uint8_t> No;
+                    No.insert(link);
+                    DevMac->UnblockTxOnLink(No,WifiQueueBlockedReason::POWER_SAVE_MODE);
+                }
+                
+            }
+        }
+    
+            
+
+        
+    }
+
     Simulator::Schedule(Seconds(0.100001),&function2,STA);
 }
 
-//signal 
+// collect  signal & noise 
 static void 
 SnifferRxCallback( uint32_t mcs, Ptr<const Packet> p, uint16_t channelFreqMhz, WifiTxVector txVector, MpduInfo aMpdu, SignalNoiseDbm signalNoise,uint16_t stdId)
 {
-
     //BER Rate
     DataRate dr = EhtPhy::GetDataRate(mcs,MHz_u{static_cast<double>(20)},NanoSeconds(800), 1);
     double signal = signalNoise.signal; // dBm
@@ -392,19 +566,19 @@ SnifferRxCallback( uint32_t mcs, Ptr<const Packet> p, uint16_t channelFreqMhz, W
     GlobalSUC = std::pow(1.0 - BER, bits); //Success rate
     GlobalBER = BER;
     
-    //test:
+    // test:
     // std::cout << "S : " << signal 
     //           << " N : " << noise 
     //           << " SNR_dB : " << snr_dB 
     //           << " SNR_L : " << snr_linear
-    //           << " BER : " << BER 
-    //           << " SUC : " << SUC
+    //           << " BER : " << GlobalBER 
+    //           << " SUC : " << GlobalSUC
     //           << " DateRate : " << dr << "\n";
 }
 
 void
-//  failure count++ 
-MyDropCallback(uint32_t linkId, Ptr<WifiNetDevice> dev, Ptr<const Packet> p, WifiPhyRxfailureReason reason)
+// collect failure count++ 
+MyDropCallback(uint32_t linkId, Ptr<const Packet> p, WifiPhyRxfailureReason reason)
 {
     Time now = Simulator::Now();
     
@@ -425,7 +599,7 @@ MyDropCallback(uint32_t linkId, Ptr<WifiNetDevice> dev, Ptr<const Packet> p, Wif
             if(lastMacAddr[linkId]!= cur.srcMac)
             {
                 apLinkTable[linkId].c_count += 1;
-                //test:
+                // test:
                 // std::cout << " link :" << linkId << " collision ! " << " LastStart : " << lastStart[linkId].GetSeconds()
                 //           << " StartTime : "<< cur.startTime.GetSeconds()  << "\n";
             }
@@ -459,29 +633,11 @@ MyDropCallback(uint32_t linkId, Ptr<WifiNetDevice> dev, Ptr<const Packet> p, Wif
                     //            << " hidenTime :" << apLinkTable[linkId].h_count << "\n";
                 }
             }
-            else if(lastMacAddr[linkId] !=  cur.srcMac)
-            {
-                Ptr<UniformRandomVariable> r = CreateObject<UniformRandomVariable>();
-                r->SetAttribute("Min", DoubleValue(0.0));
-                r->SetAttribute("Max", DoubleValue(1.0));
-                //test:
-                if(GlobalSUC < r->GetValue() && GlobalSUC != 0)
-                {
-                    apLinkTable[linkId].n_count += 1;
-                    // std:: cout <<"link : " << linkId <<"  noise : " <<apLinkTable[linkId].n_count << "        "<< GlobalSUC <<"    <    " << r->GetValue()<<"\n";
-
-                }
-                else
-                {
-                    apLinkTable[linkId].unknown += 1;
-                }
-
-
-            }
             else
             {
                 apLinkTable[linkId].unknown += 1;
             }
+            
         }
         // test:
 
@@ -502,20 +658,94 @@ MyDropCallback(uint32_t linkId, Ptr<WifiNetDevice> dev, Ptr<const Packet> p, Wif
                 
 }
 
+void
+RandomNoise(NodeContainer STA)
+{
+    Ptr<LogNormalRandomVariable> logRan = CreateObject<LogNormalRandomVariable>();
+    logRan->SetAttribute("Mu", DoubleValue(-20));
+    logRan->SetAttribute("Sigma", DoubleValue(1.5));
+
+    Ptr<UniformRandomVariable> durationRan = CreateObject<UniformRandomVariable>();
+    durationRan->SetAttribute("Min", DoubleValue(0.1)); //10us
+    durationRan->SetAttribute("Max", DoubleValue(0.75)); // 0.5s
+    
+    for(uint32_t i = 0; i < STA.GetN(); i++)
+    {
+        Ptr<WifiNetDevice> dev = DynamicCast<WifiNetDevice>(STA.Get(i)->GetDevice(0));
+        for(uint32_t linkId = 0; linkId < 3; linkId++)
+        {
+            Ptr<SpectrumWifiPhy> phy =  DynamicCast<SpectrumWifiPhy>(dev->GetPhy(linkId));   if (phy == nullptr) continue;
+            Ptr<WifiMac>  mac = DynamicCast<WifiMac>(dev->GetMac());
+            auto fem = mac->GetFrameExchangeManager(linkId);
+            Mac48Address src = fem->GetAddress();
+            double noise = logRan->GetValue();
+            double noiseDb = 10 * std::log10(noise);
+            Time holdTime = Seconds(durationRan->GetValue());
+            std::pair key = std::make_pair(linkId,src);
+            g_activeTx[key].noisedBm = noiseDb;
+            // std::cout << "noiseDb : " << noiseDb <<'\n';
+            Simulator::Schedule(holdTime,[key](){g_activeTx[key].noisedBm = -86;}); //noise end -> base noise 
+        }
+    }
+    Simulator::Schedule(Seconds(0.5),&RandomNoise,STA);
+}
 // success count++
+
 void
 MySucCallback(uint32_t linkId, Ptr<const Packet> p)
 {
-    apLinkTable[linkId].s_count += 1;
+    WifiMacHeader hdr;
+    p->PeekHeader(hdr);
+    Mac48Address src = hdr.GetAddr2();
+    std::pair key = std::make_pair(linkId,src);
+    DataRate dr = EhtPhy::GetDataRate(4,MHz_u{static_cast<double>(20)},NanoSeconds(800), 1);
+    double signal = g_activeTx[key].signaldBm; // dBm
+    double noise  = g_activeTx[key].noisedBm;  // dBm
+    double snr_dB = signal - noise;
+    double snr_linear = std::pow(10.0, snr_dB / 10.0);
+    double EbNo = snr_linear * 20 * 1e6 / dr.GetBitRate();
+    double Q_arg = std::sqrt((3 * log2(16) * EbNo) / (16 - 1.0));
+    double Q_val = 0.5 * std::erfc(Q_arg / std::sqrt(2.0));
+    double BER = (4.0 / log2(16)) * (1 - 1.0 / std::sqrt(16)) * Q_val;
+    int bits = p->GetSize()*8;
+    double SUC = std::pow(1.0 - BER, bits);
+
+    //test
+    // std::cout << "key : " << key 
+    //           << " noise : " << g_activeTx[key].noisedBm 
+    //           << " signal : " <<  g_activeTx[key].signaldBm 
+    //           << " snr_dB : " << snr_dB
+    //           << " BER : "    <<  BER
+    //           << "\nbits : "  << bits
+    //           << " SUC : "    <<  SUC
+    //           <<"\n";
+
+    Ptr<UniformRandomVariable> RV = CreateObject<UniformRandomVariable>();
+    RV->SetAttribute("Min", DoubleValue(0.0));
+    RV->SetAttribute("Max", DoubleValue(1.0));
+
+    double r =  RV->GetValue();
+    if(r < SUC)
+    {
+        apLinkTable[linkId].s_count += 1;
+    }
+    else
+    {
+        apLinkTable[linkId].n_count += 1;
+
+        if(apLinkTable[linkId].NoiseTable.count(src) > 0)
+        {
+            apLinkTable[linkId].NoiseTable[src] += 1;
+        }
+        else
+        {
+            apLinkTable[linkId].NoiseTable.emplace(src, 1);
+        }
+    }
 }
 
 
-
-
-
-
 // move model
-
 MobilityHelper InstallApMove(NodeContainer wifiApNode)
 {
     MobilityHelper mobilityAp;
@@ -541,6 +771,7 @@ MobilityHelper InstallStaMove(double maxRadius, uint32_t nwifiSTA, NodeContainer
     angleGen->SetAttribute("Max", DoubleValue(2 * M_PI));
 
     MobilityHelper mobilitysta;
+
     for (uint32_t i = 0; i < nwifiSTA;++i)
     {
       double radius = maxRadius * std::sqrt(rhoGen->GetValue()); //uniform radius maxRadius * scaling ratio
@@ -551,6 +782,7 @@ MobilityHelper InstallStaMove(double maxRadius, uint32_t nwifiSTA, NodeContainer
       staPosAlloc->Add(Vector(x,y,0.0));
         
     }
+
     mobilitysta.SetPositionAllocator(staPosAlloc);
     mobilitysta.SetMobilityModel("ns3::RandomWalk2dMobilityModel",
                               "Bounds",
@@ -788,11 +1020,6 @@ ApplicationContainer CreateClientFlow(UintegerValue ACLevel, UintegerValue paylo
 }
 
 
-
-
-
-
-
 /**
  * @param udp true if UDP is used, false if TCP is used
  * @param serverApp a container of server applications
@@ -894,7 +1121,7 @@ int main(int argc, char* argv[])
     uint16_t auxPhyChWidth{20};
     bool auxPhyTxCapable{true}; // Can UPlink ?
 
-    Time simulationTime{"5s"};
+    Time simulationTime{"20s"};
     //simulation time (interference time)
     // double simStartTime = 1.0;
 
@@ -1005,7 +1232,7 @@ int main(int argc, char* argv[])
                 {
                     NS_FATAL_ERROR("Frequency values must be unique!");
                 }
-
+            // setting frequency
                 for (auto freq : {frequency, frequency2, frequency3})
                 {
                     if (nLinks > 0 && freq == 0)
@@ -1060,17 +1287,18 @@ int main(int argc, char* argv[])
                 
                 Ssid ssid = Ssid("ns3-80211be");
                 
-            //PHY
                 SpectrumWifiPhyHelper phy(nLinks);
+            //STA PHY
                 phy.SetPcapDataLinkType(WifiPhyHelper::DLT_IEEE802_11_RADIO);
                 phy.Set("ChannelSwitchDelay", TimeValue(channelSwitchDelay));
                 phy.Set("TxPowerStart", DoubleValue(21.0));
                 phy.Set("TxPowerEnd", DoubleValue(21.0));
                 phy.Set("TxPowerLevels", UintegerValue(1));
+                
             //error model
                 phy.SetErrorRateModel("ns3::YansErrorRateModel");
                 
-         
+            //STA Mac
                 mac.SetType("ns3::StaWifiMac", 
                             "Ssid", SsidValue(ssid),
                             "QosSupported", BooleanValue(true),
@@ -1096,15 +1324,11 @@ int main(int argc, char* argv[])
                 
                 for (uint8_t linkId = 0; linkId < nLinks; linkId++)
                 {
-                    phy.Set(linkId, "ChannelSettings", StringValue(channelStr[linkId]));
+                    phy.Set(linkId, "ChannelSettings", StringValue(channelStr[linkId])); // binding link and frequency  : link 0 -> 2.4GHz
                     auto spectrumChannel = CreateObject<MultiModelSpectrumChannel>();
                     
                     //signal loss model - have value ->hidden node
                     auto lossModel = CreateObject<LogDistancePropagationLossModel>();
-                    // give channel my lossModel
-                    // auto delayModel = CreateObject<ConstantSpeedPropagationDelayModel>();
-                    // spectrumChannel->SetPropagationDelayModel(delayModel);
-
                     spectrumChannel->AddPropagationLossModel(lossModel);
                     phy.AddChannel(spectrumChannel, freqRanges[linkId]);
                   
@@ -1112,9 +1336,8 @@ int main(int argc, char* argv[])
                 
             //install STA
                 staDevices = wifi.Install(phy, mac, wifiStaNodes);
+
             //Open TXOP System
-            
-                
                 Ptr<NetDevice> dev;
                 Ptr<WifiNetDevice>wifi_dev;
                 PointerValue ptr;
@@ -1136,8 +1359,6 @@ int main(int argc, char* argv[])
                     wifi_dev->GetMac()->SetAttribute("VO_MaxAmsduSize", UintegerValue(3839));
                     wifi_dev->GetMac()->SetAttribute("VI_MaxAmsduSize", UintegerValue(3839));
                 }
-                
-                
                 
             //OFDMA(wait)
                 if (dlAckSeqType != "NO-OFDMA")
@@ -1182,14 +1403,6 @@ int main(int argc, char* argv[])
                 Config::Set ("/NodeList/*/DeviceList/*/$ns3::ApWifiMac/DisassocTimeout", TimeValue (Seconds (0)));
 
                 
-                dev = wifiAPNode.Get(0)->GetDevice(0);
-                wifi_dev = DynamicCast<WifiNetDevice>(dev);
-                wifi_dev->GetMac()->SetAttribute("BE_MaxAmpduSize", UintegerValue(32768));
-                wifi_dev->GetMac()->SetAttribute("BE_MaxAmsduSize", UintegerValue(3839));
-                //can use to get bit,
-                wifi_dev->GetMac()->GetAttribute("BE_Txop", ptr);
-                edca = ptr.Get<QosTxop>();
-                
             //random number
                 streamNumber += WifiHelper::AssignStreams(apDevice, streamNumber);
                 streamNumber += WifiHelper::AssignStreams(staDevices, streamNumber);
@@ -1207,6 +1420,7 @@ int main(int argc, char* argv[])
                 
                 mobilitySTA =InstallStaMove(maxRadius,nStations,wifiStaNodes);
                 mobilityAP = InstallApMove(wifiAPNode);
+
             //interferer
             if(intterf == true)
             {
@@ -1287,6 +1501,7 @@ int main(int argc, char* argv[])
                     }
                 }
             } 
+            
             /* Internet stack*/
                 InternetStackHelper stack;
                 stack.Install(wifiAPNode);
@@ -1418,34 +1633,39 @@ int main(int argc, char* argv[])
                 Ptr<FlowMonitor> monitor = flowmon.InstallAll();
                 
 
-            // STA掛勾三條link是否成功
-            if(STAaddr_linkid == true)
+            // STA掛勾三條link是否成功 +設定slot同步 (9us)
+            //STAaddr_linkid
+            for(u_int32_t i = 0; i < nStations ;++i)
             {
-                for(u_int32_t i = 0; i < nStations ;++i)
-                {
-                    const Ptr<WifiNetDevice> mloDevice = DynamicCast<WifiNetDevice>(staDevices.Get(i));
-                    Ptr<WifiMac> mac = mloDevice->GetMac();
-                    for(uint8_t Linkid = 0; Linkid <std::max<uint8_t>(mloDevice->GetNPhys(),1);++Linkid)
-                    {
-                        auto fem = mac->GetFrameExchangeManager(Linkid); //mac of limk i
-                        std::cout<<" staDevice " << i << " LinkId " << std::to_string(Linkid) 
-                                 << " mac address: " << fem->GetAddress() <<"\n";
-                    }
+                const Ptr<WifiNetDevice> mloDevice = DynamicCast<WifiNetDevice>(staDevices.Get(i));
+                Ptr<WifiMac> mac = mloDevice->GetMac();
+                
+                for(uint8_t Linkid = 0; Linkid <std::max<uint8_t>(mloDevice->GetNPhys(),1); ++Linkid)
+                {   
+                    Ptr<WifiPhy> devphy = mloDevice->GetPhy(Linkid);
+                    devphy->SetSlot(MicroSeconds(9));
 
+                    
+                    // auto fem = mac->GetFrameExchangeManager(Linkid); //mac of limk i
+                    // std::cout<<" staDevice " << i << " LinkId " << std::to_string(Linkid) 
+                    //          << " mac address: " << fem->GetAddress() <<"\n";
+                    // std::cout << "slot : "<< devphy->GetSlot().GetMicroSeconds()<<"\n";
                 }
-            }
-            //trace
 
+            }
+          
+            
+            //trace
             //物理層錯誤查詢 (ap)
            
 
             for(uint32_t i = 0; i < nLinks; ++i)
             {
                 const Ptr<WifiNetDevice> mloDevice = DynamicCast<WifiNetDevice>(apDevice.Get(0));
-                Ptr<WifiPhy> phy = mloDevice->GetPhy(i);
-                phy->TraceConnectWithoutContext("MonitorSnifferRx",MakeBoundCallback(&SnifferRxCallback, mcs));
-                phy->TraceConnectWithoutContext("PhyRxDrop", MakeBoundCallback(&MyDropCallback,i , mloDevice));
-                phy->TraceConnectWithoutContext("PhyRxEnd", MakeBoundCallback(&MySucCallback, i));
+                Ptr<WifiPhy> wifiphy = mloDevice->GetPhy(i);
+                wifiphy->TraceConnectWithoutContext("MonitorSnifferRx",MakeBoundCallback(&SnifferRxCallback, mcs));
+                wifiphy->TraceConnectWithoutContext("PhyRxDrop", MakeBoundCallback(&MyDropCallback,i));
+                wifiphy->TraceConnectWithoutContext("PhyRxEnd", MakeBoundCallback(&MySucCallback, i));
             }
 
 
@@ -1461,13 +1681,11 @@ int main(int argc, char* argv[])
                }   
             }
             
-            const Ptr<WifiNetDevice> Dev = DynamicCast<WifiNetDevice>(staDevices.Get(0));
-            Ptr<WifiMac> Devmac = DynamicCast<WifiMac>(Dev->GetMac());
-            Ptr<WifiPhy> devphy = Dev->GetPhy(0);
-            std::cout << devphy->GetSlot().GetMicroSeconds()<<"\n";
+           
             //start--------------------------------------
     
                 Simulator::Schedule(Seconds(0.0),&ClearElement,wifiStaNodes);
+                Simulator::Schedule(Seconds(0.0),&RandomNoise,wifiStaNodes);
                 Simulator::Schedule(Seconds(0.0),&function2,wifiStaNodes);
                 Simulator::Stop(simulationTime + Seconds(1)); //end time (need define before simulator::Run())
                 Simulator::Run();
