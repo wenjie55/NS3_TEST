@@ -6,10 +6,7 @@
  * Author: Sebastien Deronne <sebastien.deronne@gmail.com>
  */
 
-/*
-    baseline -> 什麽都沒有的,但需要
-    流量設定 12個 MLO , 6個 non-MLO
-*/
+
 #include "ns3/attribute-container.h"
 #include "ns3/boolean.h"
 #include "ns3/command-line.h"
@@ -83,7 +80,6 @@ struct LinkTable
     uint32_t B_cnt = 0 ; //HCCA open time
     uint32_t c_count = 0;
     uint32_t n_count = 0;
-    uint32_t nr_count = 0;
     uint32_t h_count = 0;
     uint32_t s_count = 0;
     uint32_t ds_count = 0;
@@ -114,24 +110,45 @@ std::vector<LinkTable> apLinkTable(3); //count
 
 
 //吞吐量
-uint32_t totalbit = 0;
+uint32_t totalbit = 0; 
 std::map<AcIndex,uint32_t>  totalActhroughput;
+std::map<AcIndex,uint32_t>  totalAcpkt;
+
+//RTA
+uint32_t RTAthroughput;
+uint32_t RTAAcpkt;
+double RTAAvgAcDelay;
+uint32_t RTADelayAcpkt;
 
 //延遲相關:
-std::vector<std::vector<double>> AvgLinkDelayofFLow;
 uint32_t totalPacket = 0;
-uint32_t totaldelay = 0;
-uint32_t perAvgDelay  = 0; 
+double totaldelay = 0;
+double perAvgDelay  = 0; // 總封包/總延遲 ->平均延遲 
 uint32_t DelayCount = 0;
-
+std::map<AcIndex,double>  perAvgAcDelay;
+std::map<AcIndex,uint32_t>  totalDelayAcpkt;
 // 因比對collision & hidden node 所以需要記住link i 上的 上一個STA起始與位址
 std::vector<Time> lastStart(3);
 std::vector<Time> lastEnd(3);
 std::vector<Mac48Address> lastMacAddr(3);
-std::vector<bool> timeFlag(3);
+std::vector<std::map<Time,bool>> timeFlag(3);
 //提供物理層快速判別STD Id的方法
 std::map<Mac48Address,uint32_t> STAlinkTable; // phylink -> STA Id
 
+// Breach 更新
+struct SlaSample {
+    ns3::Time t;     // 取樣時間（用 ACK 到達時刻）
+    uint8_t    b;    // breach_bit ∈ {0,1}，STA_Delay > D_TH ? 1 : 0
+};
+// ---- 參數 ----
+static const double TSLA_SEC = 1.0;     // 時間窗長度（論文精神，建議 1s 起）
+static const double EPS      = 1e-9;    // 除零保護
+// ---- 每 STA 狀態 ----
+std::vector<std::deque<SlaSample>> g_slaWin(5);       // g_slaWin[staId] = 最近 TSLA 秒內樣本
+std::vector<uint32_t> g_winCount(5);     // 每 STA 視窗樣本數
+std::vector<uint32_t> g_winBreach(5);    // 每 STA 視窗內 breach=1 的個數
+//全部優先權的delay設定
+std::vector<uint32_t> DelayTh ={5,100,200,1000,1000}; 
 
 Time beaconInterval = MilliSeconds (300);
 double HN_threshold = 0.05;
@@ -202,7 +219,7 @@ PhyTxBeginTrace(Ptr<WifiNetDevice> dev,uint32_t linkId, Ptr<const Packet> packet
     //           << " UID: " << packet->GetUid()
     //           <<"\n-------------------------------------------------------------"
     //           << std::endl;
-              
+      
     // std ::cout <<"RX key : " << key << "  Tx srcMac : " << srcPHY <<"\n";
 }
 
@@ -404,7 +421,6 @@ ClearElement(NodeContainer STA)
 
         //clean link i
         apLinkTable[i].n_count = 0;
-        apLinkTable[i].nr_count = 0;
         apLinkTable[i].h_count = 0;
         apLinkTable[i].c_count = 0;
         apLinkTable[i].s_count = 0;
@@ -435,9 +451,9 @@ MyDropCallback(uint32_t linkId, Ptr<const Packet> p, WifiPhyRxfailureReason reas
         const TxRecord& cur = it->second;
         if(std::abs((lastStart[linkId] - cur.startTime).GetMicroSeconds()) < 9)
         {
-            if(lastMacAddr[linkId]!= cur.srcMac && !(timeFlag[linkId]))
+            if(lastMacAddr[linkId]!= cur.srcMac && !(timeFlag[linkId][lastStart[linkId]]))
             {
-                timeFlag[linkId] = true;
+                timeFlag[linkId][lastStart[linkId]] = true;
                 apLinkTable[linkId].c_count += 1;
                 // test:
                 // std::cout << " link :" << linkId << " collision ! " << " LastStart : " << lastStart[linkId].GetSeconds()
@@ -446,10 +462,10 @@ MyDropCallback(uint32_t linkId, Ptr<const Packet> p, WifiPhyRxfailureReason reas
             }
         }
         else
-        {
-            if(lastEnd[linkId] > cur.startTime /*表示上一個封包還沒結束但下一個封包已經開始了*/ && std::abs((lastStart[linkId] - cur.startTime).GetMicroSeconds()) > 7 /*上一次與這一次開始已經大於一個slot(非同位碰撞)*/)
+        {   /*表示上一個封包還沒結束但下一個封包已經開始了*/ /*上一次與這一次開始已經大於一個slot(非同位碰撞)*/
+            if((lastEnd[linkId]  - cur.startTime).GetMicroSeconds() > 1 && (cur.startTime - lastStart[linkId]).GetMicroSeconds() > 9  && reason != WifiPhyRxfailureReason::TXING) 
             {
-                if(lastMacAddr[linkId]!= cur.srcMac)
+                if(lastMacAddr[linkId]!= cur.srcMac )
                 {
                     apLinkTable[linkId].h_count += 1;
                     if(apLinkTable[linkId].hideTable.count(lastMacAddr[linkId]) > 0)
@@ -465,29 +481,21 @@ MyDropCallback(uint32_t linkId, Ptr<const Packet> p, WifiPhyRxfailureReason reas
 
                     // test:
                     // std::cout  << " link :" << linkId << " hidden_node ! "
+                    //            << " Type : "<< cur.Type
                     //            << " src Mac : " << cur.srcMac
                     //            << " last Mac :" << lastMacAddr[linkId]
-                    //            << " lastEnd : " << lastEnd[linkId].GetSeconds()
-                    //            << " StartTime : "<< cur.startTime.GetSeconds()
+                    //            << " lastEnd : " << lastEnd[linkId].GetSeconds() //a2
+                    //            << " StartTime : "<< cur.startTime.GetSeconds() //b1
+                    //            << " B1 - A1 : "     << (cur.startTime - lastStart[linkId]).GetMicroSeconds()
+                    //            << " A2 - B1 : "     << std::abs((lastEnd[linkId]  - cur.startTime).GetMicroSeconds())
                     //            << " hidenTime :" << apLinkTable[linkId].h_count << "\n";
+
+                    // std::cout << "srcMac :  "<< cur.srcMac << " print :" << hdr.GetDuration().GetSeconds()
+                    //           <<"\nnow : " << now.GetSeconds() <<"    startTime : " << cur.startTime.GetSeconds() << "    endTime : " <<cur.endTime.GetSeconds() 
+                    //           << "\nlink : " << linkId << " Type : "<< cur.Type << "  reason :  "  << reason <<"\n" 
+                    //           << "---------------------------------------------------------------------------------------------------\n";
                 }
-            }
-            else
-            {
-                apLinkTable[linkId].unknown += 1;
-                // std::cout  << " link :" << linkId << " unknown ! "
-                //                << "reason : "   << reason
-                //                << "\nsrc Mac : " << cur.srcMac
-                //                << " last Mac :" << lastMacAddr[linkId]
-                //                << "\nlast Start : " << lastStart[linkId].GetSeconds()
-                //                << " lastEnd : " << lastEnd[linkId].GetSeconds()
-                //                << " StartTime : "<< cur.startTime.GetSeconds()
-                //                << " EndTime : " << cur.endTime.GetSeconds()
-                //                << " now : " << now.GetSeconds()
-                //                << " type : " << cur.Type
-                //                << "\n";
-            }
-            
+            } 
         }
         // test:
         // std::cout << "srcMac :  "<< cur.srcMac << " print :" << hdr.GetDuration().GetSeconds()
@@ -496,7 +504,7 @@ MyDropCallback(uint32_t linkId, Ptr<const Packet> p, WifiPhyRxfailureReason reas
         //           << " Beacon : "<< now.GetSeconds() / double(0.1) << "\n"
         //           << "---------------------------------------------------------------------------------------------------\n";
 
-        if(lastStart[linkId] != cur.startTime) timeFlag[linkId] = false; // 新時間尚未被統計 因pc= 1(1-tou)^n-1 ->因此只統計一次
+        if(lastStart[linkId] != cur.startTime) timeFlag[linkId][cur.startTime] = false; // 新時間尚未被統計 因pc= 1(1-tou)^n-1 ->因此只統計一次
         lastStart[linkId]   = cur.startTime;
         lastEnd[linkId]     = cur.endTime;
         lastMacAddr[linkId] = cur.srcMac;
@@ -541,26 +549,63 @@ RandomNoise(NodeContainer STA)
     Simulator::Schedule(Seconds(1),&RandomNoise,STA);
 }
 
+
 // success count++ (check-ok)
 void
-MySucCallback(uint32_t linkId,uint8_t mcs, Ptr<const Packet> p)
+MySucCallback(uint32_t linkId,uint8_t mcs,Ptr<const Packet> p)
 {
     WifiMacHeader hdr;
     p->PeekHeader(hdr);
     Mac48Address src = hdr.GetAddr2();
     //現在時間
     Time now = Simulator::Now();
-    //產生時間
+    //產生時間標籤
     TimestampTag timestamp;
     p->FindFirstMatchingByteTag (timestamp);
     Time tx = timestamp.GetTimestamp();
     double start = tx.ToDouble(Time::MS);
-    if(start > 5000)
+
+    if(start > 5000 && (hdr.IsData()||hdr.IsQosData()))
     {
         Time txdelay = Simulator::Now() - tx;
         double delay = txdelay.ToDouble(Time::MS);
-        totalPacket ++;
+        SocketPriorityTag prio;
+        p->FindFirstMatchingByteTag (prio);              
+        AcIndex ac = QosUtilsMapTidToAc(prio.GetPriority());
+        //總延遲
         totaldelay += delay;
+        totalPacket ++;
+        FlowIdTag flowTag;
+        if(p->PeekPacketTag(flowTag))
+        {
+            uint32_t id = flowTag.GetFlowId();
+            if(id != 0)
+            {
+                perAvgAcDelay[ac] += delay;
+                totalDelayAcpkt[ac]++;
+            }else
+            {
+                RTAAvgAcDelay +=delay;
+                RTADelayAcpkt++;
+            }
+        }
+
+        //整塊都是SLA
+        if(p->PeekPacketTag(flowTag))
+        {
+            uint32_t id = flowTag.GetFlowId();
+            uint8_t breach = (delay > DelayTh[id]) ? 1 : 0;
+            //紀錄時間now下 STA staId 的 第id個優先權的延遲時間用於進行滑動視窗
+            g_slaWin[id].push_back({now, breach}); 
+            g_winCount[id] += 1;
+            g_winBreach[id] += breach;
+            ns3::Time cutoff = now - ns3::Seconds(TSLA_SEC);
+            while(!g_slaWin[id].empty() && g_slaWin[id].front().t < cutoff){
+                g_winCount[id]  -= 1;
+                g_winBreach[id] -= g_slaWin[id].front().b;
+                g_slaWin[id].pop_front();
+            }
+        }  
         // double nowTime = now.ToDouble(Time::MS);
         // std::cout<< " now : " << nowTime << " Start : " << start  <<" delay : " << delay << '\n';
     }
@@ -568,6 +613,7 @@ MySucCallback(uint32_t linkId,uint8_t mcs, Ptr<const Packet> p)
     // auto type = hdr.GetTypeString();
     // std::cout << "src : " << src << " des : " << hdr.GetAddr1() <<'\n';
     // std::cout << "Packet type : " << type  << " | time : " << now.GetSeconds();
+    // std::cout << " bits : "  << p-> GetSize() * 8 <<'\n';
     // std::cout << " | RTS is  : " << hdr.IsRts() << " | linkId : " << linkId << "\n";
 
     std::pair key = std::make_pair(linkId,src);
@@ -600,37 +646,71 @@ MySucCallback(uint32_t linkId,uint8_t mcs, Ptr<const Packet> p)
     RV->SetAttribute("Max", DoubleValue(1.0));
 
     double r =  RV->GetValue();
-    if(r < SUC)
+    if(now.GetSeconds() > simStart)
     {
-        if(now.GetSeconds() > simStart  && (hdr.IsData()||hdr.IsQosData())) 
+        if(hdr.IsData()||hdr.IsQosData())
         {
-            totalbit += bits;
-            apLinkTable[linkId].ds_count +=1;
-        }
-        if(hdr.IsRts())
-        {
-            apLinkTable[linkId].s_count += 1;
-        }
-    }
-    else
-    {
-        if(apLinkTable[linkId].NoiseTable.count(src) > 0) //把noise導致的 STA放入N_Table 含任何rts/ack/data
-        {
-            apLinkTable[linkId].NoiseTable[src] += 1;
-        }
-        else
-        {
-            apLinkTable[linkId].NoiseTable.emplace(src, 1);
-        }
+            FlowIdTag flowTag;
+            uint32_t id = 5;
+            if(p->PeekPacketTag(flowTag)) id = flowTag.GetFlowId();
 
-        if(hdr.IsRts())
-        {   
-            apLinkTable[linkId].nr_count += 1;
+            totalbit += 272;  //RTS (160)  + CTS (112)
+            SocketPriorityTag prio;
+            p->FindFirstMatchingByteTag (prio);              
+            AcIndex ac = QosUtilsMapTidToAc(prio.GetPriority());
+
+            if(id!=0)totalActhroughput[ac] += 272;
+            else RTAthroughput += 272;
+            
+            if(r < SUC)
+            {
+                totalbit += bits;
+                totalbit += 112 ; // ACK
+                apLinkTable[linkId].ds_count +=1;
+
+                 if(id !=0) //RTA分開算
+                {
+                    totalActhroughput[ac] += bits;
+                    totalActhroughput[ac] += 112;
+                    totalAcpkt[ac]++;
+                }else
+                {
+                    RTAthroughput += bits;
+                    RTAthroughput +=112;
+                    RTAAcpkt++;
+                    // std:: cout << " RTA throughput :" << RTAthroughput <<"\n";
+                }
+                // std::cout << "src : " << src
+                //           << " Type : " << hdr.GetTypeString()
+                //           << " Time : " <<  now.GetSeconds() <<" us"
+                //           << " duration : " << (g_activeTx[key].endTime - g_activeTx[key].startTime).GetMicroSeconds()
+                //           << " Packet size : " << p->GetSize()
+                //           << " Data : " << bits <<" bit"
+                //           <<"\n";
+            }else
+            {
+                //把noise導致的 STA放入N_Table 含任何rts/ack/data
+                apLinkTable[linkId].n_count += 1;
+                if(apLinkTable[linkId].NoiseTable.count(src) > 0)  apLinkTable[linkId].NoiseTable[src] += 1;
+                else apLinkTable[linkId].NoiseTable.emplace(src, 1);
+                //扣除噪音導致的損失:
+                SocketPriorityTag prio;
+                p->FindFirstMatchingByteTag (prio);              
+                AcIndex ac = QosUtilsMapTidToAc(prio.GetPriority());
+                totalPacket --;
+                totalDelayAcpkt[ac]--;
+            }
+
+            // std::cout << "key : " << key 
+            //           << " noise : " << g_activeTx[key].noisedBm 
+            //           << " signal : " <<  g_activeTx[key].signaldBm 
+            //           << " snr_dB : " << snr_dB
+            //           << " BER : "    <<  BER
+            //           << "\nbits : "  << bits
+            //           << " SUC : "    <<  SUC
+            //           <<"\n";
         }
-        else if (hdr.IsData() || hdr.IsQosData()) // 在data/QoS data 產生noise
-        {
-            apLinkTable[linkId].n_count += 1;
-        }
+        else if(hdr.IsRts()) apLinkTable[linkId].s_count += 1; 
     }
 }
 
@@ -641,110 +721,110 @@ MySucCallback(uint32_t linkId,uint8_t mcs, Ptr<const Packet> p)
 
 // 定期產生流量 payloadSize(封包大小),nSTA(幾個STA), acList(優先權類型)
 void
-SendPacket(std::vector<std::vector<Ptr<Socket>>> staSockets,uint32_t nSTA, AcIndex ac)
+SendPacket(std::vector<std::vector<Ptr<Socket>>> staSockets,uint32_t staId, std::string name,std::map<std::string, double>& lambdamap)
 {  
+    // Link selection
     Ptr<UniformRandomVariable> rand = CreateObject<UniformRandomVariable>();
+    double r = rand->GetValue(0, 1);
+    double l1 = 0.33;
+    double l2 = 0.66;
+    uint32_t link = 0 ;
     
-        for(uint32_t staId = 0; staId < nSTA; staId++)
-        {
-        
-    
-            double r = rand->GetValue(0, 1);
-            double l1 = 0.33;
-            double l2 = 0.66;
-            uint32_t link = 0 ;
+    if(r <= l1)link = 0 ;
+    else if(l1 < r && r <= l2)link = 1 ;
+    else if ( l2 < r)link = 2 ;
+    else std::cout << "error flow !!!!!" <<'\n';
 
-            if(r <= l1)
-            {
-                link = 0 ;
-            }
-            else if(l1 < r && r <= l2)
-            {
-                link = 1 ;
-            }
-            else if ( l2 < r)
-            {
-                link = 2 ;
-            }
-            else
-            {
-                std::cout << "error flow !!!!!" <<'\n';
-            }
+    // std::cout << " link is " << link << " ac : " << name << "\n";
+    /*
+    流量產生
+    type     ac lamda size       trafficId
+    RTA      VO  140  358   Byte  0
+    --------------------- 
+    VO       VO  50   70    Byte  1
+    ---------------------
+    VI       VI  60   2083  Byte  2
+    ---------------------
+    BE       BE  100  1500  Byte  3
+    ---------------------
+    BK       BK  996  1500  Byte  5
+    */
+   
+   Ptr<Packet> pkt;
+   SocketPriorityTag prio;
+   TimestampTag timestamp;
+   timestamp.SetTimestamp(Simulator::Now());
+   //std::cout << "name : " << name << " ac : " << ac << " lambda : " <<  lambdamap[name]<<"\n";
+   if(name == "RTA")
+    {
+       pkt = Create<Packet>(358); 
+       prio.SetPriority(6); //VO
+       pkt->AddPacketTag(prio);
+       pkt->AddByteTag(timestamp);
+       pkt->AddByteTag(prio);
 
-            //流量產生 size
-            Ptr<Packet> pkt;
-            SocketPriorityTag prio;
-            TimestampTag timestamp;
-            timestamp.SetTimestamp(Simulator::Now());
-            if(staId < nSTA)
-            {
-                if(ac == AC_VO)
-                {
-                    pkt = Create<Packet>(700); // 1ms產生
-                    prio.SetPriority(6);
-                    pkt->AddPacketTag(prio);
-                    pkt->AddByteTag(timestamp);
-                    staSockets[staId][link]->Send(pkt);
-                } 
-                else if (ac == AC_VI)
-                {
-                    pkt = Create<Packet>(700); //10ms 產生
-                    prio.SetPriority(4);
-                    pkt->AddPacketTag(prio);
-                    pkt->AddByteTag(timestamp);
-                    staSockets[staId][link]->Send(pkt);                
-                } 
-                else if (ac == AC_BE) 
-                {
-                    pkt = Create<Packet>(700); //10ms 產生
-                    prio.SetPriority(0);
-                    pkt->AddPacketTag(prio);
-                    pkt->AddByteTag(timestamp);
-                    staSockets[staId][link]->Send(pkt);                
-                }
-                else if( ac == AC_BK) 
-                {
-                    for(uint32_t nlink = 0; nlink < 3 ; nlink ++)
-                    {
-                        pkt = Create<Packet>(700);  // 1ms ~2.4ms
-                        prio.SetPriority(1);
-                        pkt->AddPacketTag(prio);
-                        pkt->AddByteTag(timestamp);
-                        staSockets[staId][link]->Send(pkt);                
-                    }
-                }
-            }else
-            {
-                break;
-            }
-        }
+       FlowIdTag flowTag;
+       flowTag.SetFlowId(0);
+       pkt->AddPacketTag(flowTag);
+       staSockets[staId][link]->Send(pkt);
+    }
+    else if(name == "VO")
+    {
+       pkt = Create<Packet>(182);  
+       prio.SetPriority(6); //VO
+       pkt->AddPacketTag(prio);
+       pkt->AddByteTag(timestamp);
+       pkt->AddByteTag(prio);
+       FlowIdTag flowTag;
+       flowTag.SetFlowId(1);
+       pkt->AddPacketTag(flowTag);
+       staSockets[staId][link]->Send(pkt);
+    }
+    else if (name == "VI")
+    {
+        pkt = Create<Packet>(2083); 
+        prio.SetPriority(4); //VI
+        pkt->AddPacketTag(prio);
+        pkt->AddByteTag(timestamp);
+        pkt->AddByteTag(prio);
+        FlowIdTag flowTag;
+        flowTag.SetFlowId(2);
+        pkt->AddPacketTag(flowTag);
+        staSockets[staId][link]->Send(pkt);            
+    } 
+    else if (name == "BE") 
+    {
+        pkt = Create<Packet>(1500);
+        prio.SetPriority(0); //BE
+        pkt->AddPacketTag(prio);
+        pkt->AddByteTag(timestamp);
+        pkt->AddByteTag(prio);
+        FlowIdTag flowTag;
+        flowTag.SetFlowId(3);
+        pkt->AddPacketTag(flowTag);
+        staSockets[staId][link]->Send(pkt);                
+    }
+    else if( name == "BK") 
+    {
+        pkt = Create<Packet>(1500);
+        prio.SetPriority(1); //BK
+        pkt->AddPacketTag(prio);
+        pkt->AddByteTag(timestamp);
+        pkt->AddByteTag(prio);
+        FlowIdTag flowTag;
+        flowTag.SetFlowId(4);
+        pkt->AddPacketTag(flowTag);
+        staSockets[staId][link]->Send(pkt);                
+    }
+   
 
-        //下一次產生時間(ms)
-        if(ac == AC_VO)
-        {
-            Simulator::Schedule(MilliSeconds(1), &SendPacket, staSockets, nSTA, ac); 
-        }
-        else if (ac == AC_VI)
-        {
-            Simulator::Schedule(MilliSeconds(1), &SendPacket, staSockets, nSTA, ac); 
-        }
-        else if (ac == AC_BE)
-        {
-            Simulator::Schedule(MilliSeconds(1), &SendPacket, staSockets, nSTA, ac); 
-            
-        }
-        else if( ac == AC_BK)
-        {
-            Ptr<UniformRandomVariable> durationRan = CreateObject<UniformRandomVariable>();
-            durationRan->SetAttribute("Min", DoubleValue(1)); //1ms
-            durationRan->SetAttribute("Max", DoubleValue(2.4)); // 2.4ms
-            Simulator::Schedule(MilliSeconds(durationRan->GetValue()), &SendPacket, staSockets, nSTA, ac);
-        }
-    // Simulator::Schedule(Seconds(0.01), &SendPacket, staSockets, nSTA, ac);  
-    // Simulator::Schedule(Seconds(0.0001), &SendPacket, staSockets, nSTA, ac);  
+    // Packet genaration interval
+    Ptr<ExponentialRandomVariable> exp = CreateObject<ExponentialRandomVariable>();
+    double lambda =  lambdamap[name];
+    exp->SetAttribute("Mean", DoubleValue(1.0 / lambda));
+    double nextTime = exp->GetValue();
+    Simulator::Schedule(Seconds(nextTime), &SendPacket, staSockets, staId, name,lambdamap); 
 }
-
-// 背景干擾流量
 
 // move model
 MobilityHelper InstallApMove(NodeContainer wifiApNode)
@@ -770,7 +850,7 @@ MobilityHelper InstallStaMove(double maxRadius, uint32_t nwifiSTA, NodeContainer
                                   "Y",
                                   StringValue("100.0"),
                                   "Rho",
-                                  StringValue("ns3::UniformRandomVariable[Min=25|Max=35]"));
+                                  StringValue("ns3::UniformRandomVariable[Min=5|Max=35]"));
 
     mobilitysta.SetMobilityModel("ns3::RandomWalk2dMobilityModel",
                               "Mode",
@@ -787,7 +867,6 @@ MobilityHelper InstallStaMove(double maxRadius, uint32_t nwifiSTA, NodeContainer
 }
 
 //吞吐量計算
-//吞吐量計算
 void
 calucationThroughput(std::ofstream& outFile)
 {
@@ -796,17 +875,24 @@ calucationThroughput(std::ofstream& outFile)
     double throghput = (totalbit/ duration)/1e6;
 
     //紀錄 time ,  throughput, totalbit , duration
-    std::cout << "totalbit : " << totalbit <<  " duration : "<< duration <<'\n';
+    std::cout << "\ntotalbit : " << totalbit <<  " duration : "<< duration <<'\n';
     std::cout << "Time : " << totalTime.GetSeconds() <<  " throghput : " << throghput << " Mbps" <<"\n";
     outFile << totalTime.GetSeconds() <<", " << throghput <<",";
     outFile << totalbit << "," << duration;
+
+    double RTATH = (RTAthroughput/duration) / 1e6 ;
+    std::cout << "RTA " << "Total Bit : " <<  RTAthroughput <<'\n'
+              << "Throughput : "<< RTATH << " Mbps"
+              << " Packet number : " << RTAAcpkt << '\n';
+    outFile << "," <<  RTATH; 
 
     std::vector<AcIndex> acList ={AC_VO,AC_VI,AC_BE,AC_BK}; 
     for(auto ac: acList)
     {
         double ACthroghput = (totalActhroughput[ac] / duration)/1e6;
-        std::cout << "ac : " << ac <<  " totalActhroughput : "<< totalActhroughput[ac] <<'\n';
-        std::cout <<  " Acthroghput : " << ACthroghput << " Mbps" <<"\n";
+        std::cout << "ac : " << ac <<  " Total Bit : "<< totalActhroughput[ac]<<"\n";
+        std::cout << "Throghput : " << ACthroghput << " Mbps";
+        std::cout << " Packet number :" <<totalAcpkt[ac] << "\n";
         outFile <<"," <<ACthroghput;
     }
     outFile<<'\n';
@@ -823,10 +909,41 @@ calucationDelay(std::ofstream& outFile)
     DelayCount++;
     perAvgDelay += nowdelay;
 
-    std::cout<< "totaldelay : " << totaldelay << " totalPacket : " << totalPacket<< '\n';
-    std::cout<< "perAvgDelay : " << perAvgDelay << " DelayCount : " << DelayCount <<'\n';
-    outFile << totalTime.GetSeconds() <<", "<< perAvgDelay <<", " << DelayCount <<'\n';
-    
+    std::cout<< "totaldelay : " << totaldelay << " totalPacket : " << totalPacket; //只記住一輪內全部的封包與延遲
+    std::cout<< " perAvgDelay : " << perAvgDelay << " DelayCount : " << DelayCount <<'\n'; //紀錄每一輪的平均時間 並且除以n輪
+    outFile << totalTime.GetSeconds() << "," <<  perAvgDelay << ", " << DelayCount;
+    //RTA
+    double RTAdelay;
+    if( RTAAvgAcDelay!=0) RTAdelay = RTAAvgAcDelay / RTADelayAcpkt;
+    std::cout << " RTA " << "Total  Time : " << RTAAvgAcDelay;
+    std::cout << " Delay : " << RTAdelay << " ms";
+    std::cout << " Packet number : " << RTADelayAcpkt <<'\n';
+    outFile <<", " <<RTAdelay;
+    //RTA
+    std::vector<AcIndex> acList ={AC_VO,AC_VI,AC_BE,AC_BK}; 
+    for(auto ac: acList)
+    {
+        double ACdelay;
+        if( totalDelayAcpkt[ac] !=0) ACdelay = perAvgAcDelay[ac] / totalDelayAcpkt[ac];
+        std::cout << "ac : " << ac <<  " Total Time : "<< perAvgAcDelay[ac];
+        std::cout << " Delay : " << ACdelay << " ms";
+        std::cout << " Packet number :" <<totalDelayAcpkt[ac] << "\n";
+        outFile <<","<< ACdelay;
+     
+    }
+    //RTA
+    double BreachWin = 0.0;
+    for(uint32_t i = 0;  i < 5; i++)
+    {
+        if (g_winCount[i] > 0) {
+            BreachWin = static_cast<double>(g_winBreach[i]) /
+            static_cast<double>(g_winCount[i]);
+        }
+        std::cout << "Priority :" << i << " Breach : " << BreachWin << '\n';
+        outFile <<"," << BreachWin ;
+    }
+    //RTA
+    outFile << '\n';
     totaldelay = 0;
     totalPacket = 0;
     Simulator::Schedule(Seconds(0.5),&calucationDelay,std::ref(outFile));  
@@ -834,10 +951,10 @@ calucationDelay(std::ofstream& outFile)
 
 int main(int argc, char* argv[])
 {
-    std::ofstream tputFile("./Data/baseline_T_4T.csv");
-    std::ofstream tputFile1("./Data/baseline_D_TD.csv");
-    tputFile << "Time,Throughput(Mbps),totalbit,duration,VO,VI,BE,BK" << "\n";
-    tputFile1 << "Time,perAvgDelay,DelayCount" <<'\n';
+    std::ofstream tputFile("./Data/throughput_s_a/STA36/baseline_T_4T.csv");
+    std::ofstream tputFile1("./Data/throughput_s_a/STA36/baseline_D_TD.csv");
+    tputFile << "Time,Throughput(Mbps),totalbit,duration,RTA,VO,VI,BE,BK" << "\n";
+    tputFile1 << "Time,perAvgDelay,DelayCount,RTA,VO,VI,BE,BK,Breach" <<'\n';
     bool udp{true};
     // bool intterf(false);
     bool useRts{true};
@@ -860,7 +977,7 @@ int main(int argc, char* argv[])
     // uint16_t auxPhyChWidth{20};
     // bool auxPhyTxCapable{true}; // Can UPlink ?
 
-    Time simulationTime{"15s"};
+    Time simulationTime{"14.5s"};
     //simulation time (interference time)
     // double simStartTime = 1.0;
 
@@ -869,30 +986,39 @@ int main(int argc, char* argv[])
                           // second link exists)
     double frequency3{6}; // whether the third link operates in the 2.4, 5 or 6 GHz (0 means no third link exists)
     
-    std::size_t nStations{18};
-    tputFile << "nStations : " << nStations<<'\n';
     std::string dlAckSeqType{"NO-OFDMA"};
     bool enableUlOfdma{false};
     bool enableBsrp{false};
     std::string mcsStr;
     std::vector<uint64_t> mcsValues;
-    uint32_t payloadSize = 700; // must fit in the max TX duration when transmitting at MCS 0 over an RU of 26 tones
     Time tputInterval{0}; // interval for detailed throughput measurement
     Time accessReqInterval{0};
-
+    
     // BSS size
     double maxRadius = 50.0;
-
+    
     //mcs & ChannelWidth gi
     uint8_t mcs = 11;
     mcsValues.push_back(mcs); 
     
     int minChannelWidth = 40;
     int maxGi = 800;
-   
+    
+    std::size_t nStations{36};
+    tputFile << "nStations : " << nStations<<'\n';
+    
     std::vector<AcIndex> acList ={AC_VO,AC_VI,AC_BE,AC_BK}; 
     for(auto ac: acList)totalActhroughput[ac] = 0;
-    
+    // std::vector<std::string> trafficId={"VI"};
+    std::vector<std::string> trafficId={"RTA","VO","VI","BE","BK"};
+    std::map<std::string, double> lambda = {
+    {"RTA",140}, //pri:1
+    {"VO", 50},  //id:2
+    {"VI", 60},  //
+    {"BE", 10},
+    {"BK", 600},
+    };
+
 
     //Open RTS/CTS
     if (useRts)
@@ -938,11 +1064,6 @@ int main(int argc, char* argv[])
             const auto segmentWidthStr = widthStr;
             int gi = maxGi; // Nanoseconds
             
-            if (!udp)
-            {
-                Config::SetDefault("ns3::TcpSocket::SegmentSize", UintegerValue(payloadSize));
-            }
-
             // WiFi Node Create
             NodeContainer wifiAPNode;
             NetDeviceContainer apDevice;
@@ -1040,7 +1161,7 @@ int main(int argc, char* argv[])
                 sharedCh[linkId] = CreateObject<MultiModelSpectrumChannel>();
                 // Ptr<LogDistancePropagationLossModel> lossModel = CreateObject<LogDistancePropagationLossModel>();
                 Ptr<RangePropagationLossModel> lossModel = CreateObject<RangePropagationLossModel>();
-                lossModel->SetAttribute("MaxRange", DoubleValue((maxRadius)));
+                lossModel->SetAttribute("MaxRange", DoubleValue((100))); //meter
                 sharedCh[linkId]->AddPropagationLossModel(lossModel);
             }
 
@@ -1051,6 +1172,8 @@ int main(int argc, char* argv[])
                         "QosSupported", BooleanValue(true),
                         "ActiveProbing",BooleanValue(false));
             
+            
+
             NetDeviceContainer newDevs;
             for (uint8_t linkId = 0; linkId < nLinks; linkId++)
             {
@@ -1158,8 +1281,8 @@ int main(int argc, char* argv[])
 
             mac.SetEdca(AC_BE, "TxopLimits", StringValue("0"));
             mac.SetEdca(AC_BK, "TxopLimits", StringValue("0"));
-            mac.SetEdca(AC_VI, "TxopLimits", StringValue("3.008ms"));
-            mac.SetEdca(AC_VO, "TxopLimits", StringValue("1.504ms"));
+            mac.SetEdca(AC_VI, "TxopLimits", StringValue("0"));
+            mac.SetEdca(AC_VO, "TxopLimits", StringValue("0"));
 
             //AP install
             for (uint32_t linkId = 0; linkId < nLinks; linkId++)
@@ -1171,8 +1294,8 @@ int main(int argc, char* argv[])
                 //手動設定雜訊->關閉原系統雜訊(避免自動降速 (mcs11))
                 phy.SetErrorRateModel("ns3::YansErrorRateModel");
                 phy.Set("RxNoiseFigure", DoubleValue(0.0));
-                phy.Set("TxPowerStart", DoubleValue(70.0));
-                phy.Set("TxPowerEnd", DoubleValue(70.0));
+                phy.Set("TxPowerStart", DoubleValue(25.0));
+                phy.Set("TxPowerEnd", DoubleValue(25.0));
                 phy.Set("TxPowerLevels", UintegerValue(1));
                 phy.Set("TxGain", DoubleValue(0.0));
                 phy.Set("RxGain", DoubleValue(0.0));
@@ -1281,10 +1404,9 @@ int main(int argc, char* argv[])
                     }
                     staSockets.push_back(socketsPerSta);
                 }
-                
-                for(AcIndex ac : acList)
+                for(uint32_t staId = 0; staId < nStations; staId++)
                 {
-                    Simulator::Schedule(Seconds(simStart), &SendPacket, staSockets, nStations,ac);
+                    for(auto name : trafficId) Simulator::Schedule(Seconds(simStart), &SendPacket, staSockets, staId,name,lambda);  
                 }
             }
             // STA掛勾三條link是否成功 
@@ -1316,6 +1438,7 @@ int main(int argc, char* argv[])
             {
                 const Ptr<WifiNetDevice> mloDevice = DynamicCast<WifiNetDevice>(apDevice.Get(i));
                 Ptr<WifiPhy> wifiphy = mloDevice->GetPhy(0);
+                // Ptr<WifiMac> wifimac = mloDevice->GetMac();
                 wifiphy->TraceConnectWithoutContext("PhyRxDrop", MakeBoundCallback(&MyDropCallback,i));
                 wifiphy->TraceConnectWithoutContext("PhyRxEnd", MakeBoundCallback(&MySucCallback, i,mcs));
             }
