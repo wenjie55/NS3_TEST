@@ -646,6 +646,13 @@ MySucCallback(uint32_t linkId,uint8_t mcs,Ptr<const Packet> p)
     RV->SetAttribute("Max", DoubleValue(1.0));
 
     double r =  RV->GetValue();
+    // std::cout << "src : " << src
+    //                       << " Type : " << hdr.GetTypeString()
+    //                       << " Time : " <<  now.GetSeconds() <<" us"
+    //                       << " duration : " << (g_activeTx[key].endTime - g_activeTx[key].startTime).GetMicroSeconds()
+    //                       << " Packet size : " << p->GetSize()
+    //                       << " Data : " << bits <<" bit"
+    //                       <<"\n";
     if(now.GetSeconds() > simStart)
     {
         if(hdr.IsData()||hdr.IsQosData())
@@ -951,8 +958,9 @@ calucationDelay(std::ofstream& outFile)
 
 int main(int argc, char* argv[])
 {
-    std::ofstream tputFile("./Data/throughput_s_a/STA36/baseline_T_4T.csv");
-    std::ofstream tputFile1("./Data/throughput_s_a/STA36/baseline_D_TD.csv");
+    std::size_t nStations{55};
+    std::ofstream tputFile("./Data/throughput_s_a/STA55/baseline_T.csv");
+    std::ofstream tputFile1("./Data/throughput_s_a/STA55/baseline_D.csv");
     tputFile << "Time,Throughput(Mbps),totalbit,duration,RTA,VO,VI,BE,BK" << "\n";
     tputFile1 << "Time,perAvgDelay,DelayCount,RTA,VO,VI,BE,BK,Breach" <<'\n';
     bool udp{true};
@@ -1004,7 +1012,6 @@ int main(int argc, char* argv[])
     int minChannelWidth = 40;
     int maxGi = 800;
     
-    std::size_t nStations{36};
     tputFile << "nStations : " << nStations<<'\n';
     
     std::vector<AcIndex> acList ={AC_VO,AC_VI,AC_BE,AC_BK}; 
@@ -1279,10 +1286,10 @@ int main(int argc, char* argv[])
                         "QosSupported", BooleanValue(true),
                         "Ssid",SsidValue(ssid));
 
-            mac.SetEdca(AC_BE, "TxopLimits", StringValue("0"));
-            mac.SetEdca(AC_BK, "TxopLimits", StringValue("0"));
-            mac.SetEdca(AC_VI, "TxopLimits", StringValue("0"));
-            mac.SetEdca(AC_VO, "TxopLimits", StringValue("0"));
+            mac.SetEdca(AC_BE, "TxopLimits", StringValue("0us"));
+            mac.SetEdca(AC_BK, "TxopLimits", StringValue("0us"));
+            mac.SetEdca(AC_VI, "TxopLimits", StringValue("0us"));
+            mac.SetEdca(AC_VO, "TxopLimits", StringValue("0us"));
 
             //AP install
             for (uint32_t linkId = 0; linkId < nLinks; linkId++)
