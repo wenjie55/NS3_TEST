@@ -368,10 +368,10 @@ ClearElement(NodeContainer STA)
             // 1 - (1-Pt) ^ (n-1) = Pc
             double denom = (STA.GetN() - 1 - k) * std::log(1.0 - Pt);  
             double numer = std::log(1.0 - 0.25);
-            Pab   =  Pab*0.5 + 0.5*(numer / denom);
+            Pab   = numer / denom;
         }else
         {
-            Pab = Pab*0.5 + 0.5*1; 
+            Pab = 1; 
         }
         
         //noise :
@@ -1199,8 +1199,9 @@ calucationDelay(std::ofstream& outFile)
 int main(int argc, char* argv[])
 {
     
-    std::ofstream tputFile("./Data/throughput_s_a/STA36/TFA_T_4T2.csv");
-    std::ofstream tputFile1("./Data/throughput_s_a/STA36/TFA_D_TD2.csv");
+    std::size_t nStations{50};
+    std::ofstream tputFile("./Data/throughput_s_a/STA50/TFA_T2.csv");
+    std::ofstream tputFile1("./Data/throughput_s_a/STA50/TFA_D2.csv");
     tputFile << "Time,Throughput(Mbps),totalbit,duration,RTA,VO,VI,BE,BK" << "\n";
     tputFile1 << "Time,perAvgDelay,DelayCount,RTA,VO,VI,BE,BK,Breach" <<'\n';
     bool udp{true};
@@ -1245,7 +1246,6 @@ int main(int argc, char* argv[])
     int minChannelWidth = 40; // 286Mbps (40MHz)
     int maxGi = 800;
 
-    std::size_t nStations{36};
     AvgLinkDelayofFLow.resize(nStations);
    
     std::vector<AcIndex> acList ={AC_VO,AC_VI,AC_BE,AC_BK}; 
