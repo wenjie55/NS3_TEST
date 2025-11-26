@@ -1035,8 +1035,9 @@ calucationDelay(std::ofstream& outFile)
 
 int main(int argc, char* argv[])
 {
-    std::ofstream tputFile("./Data/throughput_s_a/STA36/SLO_P_B.csv");
-    std::ofstream tputFile1("./Data/throughput_s_a/STA36/SLO_D.csv");
+    std::size_t nStations{50};
+    std::ofstream tputFile("./Data/throughput_s_a/STA50/SLO_T.csv");
+    std::ofstream tputFile1("./Data/throughput_s_a/STA50/SLO_D.csv");
     tputFile << "Time,Throughput(Mbps),totalbit,duration,RTA,VO,VI,BE,BK" << "\n";
     tputFile1 << "Time,perAvgDelay,DelayCount,RTA,VO,VI,BE,BK,Breach" <<'\n';
 
@@ -1081,7 +1082,6 @@ int main(int argc, char* argv[])
     int minChannelWidth = 40;
     int maxGi = 800;
 
-    std::size_t nStations{36};
    
     std::vector<AcIndex> acList ={AC_VO,AC_VI,AC_BE,AC_BK}; 
     for(auto ac: acList)totalActhroughput[ac] = 0;
